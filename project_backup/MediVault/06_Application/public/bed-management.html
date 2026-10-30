@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bed Management · MediCare</title>
+
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link href="/assets/css/medivault-restyle.css" rel="stylesheet">
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<style>
+/* Ward map grid: responsive tile layout */
+.ward-section.mv-card {
+    background: var(--mv-surface) !important;
+    border: 1px solid var(--mv-border) !important;
+    border-radius: var(--mv-radius-card, 10px) !important;
+    box-shadow: var(--mv-shadow-sm) !important;
+    margin-bottom: 1.5rem !important;
+    overflow: hidden !important;
+}
+.ward-header {
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    padding: 1rem 1.25rem !important;
+    border-top: none !important;
+    border-bottom: 1px solid var(--mv-border) !important;
+    background: var(--mv-surface) !important;
+}
+.ward-header h3 {
+    font-size: 1rem !important;
+    font-weight: 600 !important;
+    margin: 0 !important;
+    color: var(--mv-text) !important;
+}
+.ward-stat {
+    font-size: .8125rem !important;
+    color: var(--mv-text-muted) !important;
+}
+.ward-stat strong {
+    color: var(--mv-text) !important;
+}
+.bed-grid {
+    display: grid !important;
+    gap: 1rem !important;
+    padding: 1.25rem !important;
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)) !important;
+}
+@media (max-width: 576px) {
+    .bed-grid { grid-template-columns: repeat(2, 1fr) !important; }
+}
+
+/* Bed tile: color-coded by status */
+.bed-tile {
+    position: relative !important;
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: space-between !important;
+    gap: .5rem !important;
+    padding: 1rem 1.125rem !important;
+    border-radius: var(--mv-radius, 8px) !important;
+    border: 1.5px solid var(--mv-border) !important;
+    cursor: pointer !important;
+    min-height: 94px !important;
+    transition: transform .15s, box-shadow .15s, border-color .15s !important;
+    background: var(--mv-surface-2) !important;
+}
+.bed-tile:hover {
+    transform: translateY(-2px) !important;
+    box-shadow: 0 6px 14px rgba(0,0,0,.15) !important;
+}
+.bed-tile.is-available {
+    background: rgba(22, 163, 74, .08) !important;
+    border-color: var(--mv-success) !important;
+}
+.bed-tile.is-occupied {
+    background: rgba(220, 38, 38, .08) !important;
+    border-color: var(--mv-danger) !important;
+}
+.bed-tile.is-cleaning {
+    background: rgba(234, 88, 12, .08) !important;
+    border-color: var(--mv-warning) !important;
+}
+.bed-number {
+    font-size: 1.125rem !important;
+    font-weight: 700 !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: .5rem !important;
+    color: var(--mv-text) !important;
+}
+.bed-number i {
+    font-size: 1.125rem !important;
+}
+.bed-patient {
+    font-size: .8125rem !important;
+    color: var(--mv-text-muted) !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    font-weight: 500 !important;
+}
+.bed-status-badge {
+    position: absolute !important;
+    top: .75rem !important;
+    right: .75rem !important;
+    width: 8px !important;
+    height: 8px !important;
+    border-radius: 50% !important;
+}
+.bed-tile.is-available .bed-status-badge { background: var(--mv-success) !important; }
+.bed-tile.is-occupied .bed-status-badge { background: var(--mv-danger) !important; }
+.bed-tile.is-cleaning .bed-status-badge { background: var(--mv-warning) !important; }
+</style>
+<script src="/assets/js/theme-init.js"></script>
+<script src="/runtime-config.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+
+<div class="mv-layout" id="mvShell"></div>
+
+<!-- Bed detail drawer (offcanvas from right) -->
+<div class="offcanvas offcanvas-end" tabindex="-1" id="bedDrawer" aria-labelledby="bedDrawerLabel">
+    <div class="offcanvas-header">
+        <h5 class="offcanvas-title" id="bedDrawerLabel">Bed Details</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="offcanvas" aria-label="Close"></button>
+    </div>
+    <div class="offcanvas-body" id="bedDrawerBody"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/mv-core.js"></script>
+<script src="/assets/js/mv-shell.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    /* =================================================================
+       Bed Management - visual ward map.
+
+       vw_bed_occupancy gives ward-level rollups (occupied/total).
+       Clicking a tile fetches one BED row via GET /api/beds/:id,
+       then opens a drawer with assign/release actions.
+       ================================================================= */
+
+    let drawerInstance;
+    let activeBedId = null;
+
+    (async function init() {
+        const ctx = await MV.shell.mount({
+            roles: ['Admin'],
+            title: 'Bed Management',
+            subtitle: 'Ward occupancy map'
+        });
+
+        ctx.actions.innerHTML =
+            '<button type="button" class="mv-btn mv-btn-outline" id="refreshBtn">' +
+              MV.icon('refresh-cw') + '<span>Refresh</span>' +
+            '</button>';
+        MV.icons(ctx.actions);
+
+        ctx.content.innerHTML = '<div id="wardSlot"></div>';
+
+        document.getElementById('refreshBtn').addEventListener('click', function () {
+            loadWards(this);
+        });
+
+        drawerInstance = new bootstrap.Offcanvas(document.getElementById('bedDrawer'));
+        loadWards();
+    })();
+
+    /* ---------------------------------------------------- ward loader */
+    async function loadWards(button) {
+        const slot = document.getElementById('wardSlot');
+        const restore = button ? MV.pending(button, 'Refreshing...') : function () {};
+
+        slot.innerHTML = ['', '', ''].map(function () {
+            return '<div class="mv-card mb-3">' +
+                '<div class="ward-header"><span class="mv-skeleton" style="width:120px;height:20px"></span>' +
+                '<span class="mv-skeleton" style="width:80px;height:16px"></span></div>' +
+                '<div class="bed-grid">' + Array(6).fill('').map(function () {
+                    return '<div class="mv-skeleton" style="height:90px;border-radius:var(--mv-radius)"></div>';
+                }).join('') + '</div></div>';
+        }).join('');
+
+        try {
+            const occupancy = await MV.api.get('/api/admin/dashboard');
+            const wards = occupancy.bed_occupancy || [];
+
+            if (!wards.length) {
+                slot.innerHTML = MV.emptyState({
+                    icon: 'bed-double', title: 'No wards configured',
+                    text: 'Add wards and beds to the BED table to see the occupancy map here.'
+                });
+                MV.icons(slot);
+                return;
+            }
+
+            // Each ward is one card. Fetch all beds for all wards in parallel
+            // (vw_bed_occupancy gives counts, not individual rows).
+            const bedsByWard = {};
+            await Promise.all(wards.map(async function (w) {
+                const rows = await MV.api.get('/api/admin/beds?ward=' + encodeURIComponent(w.ward_name));
+                bedsByWard[w.ward_name] = rows || [];
+            }));
+
+            slot.innerHTML = wards.map(function (w) {
+                const beds = bedsByWard[w.ward_name] || [];
+                const occupied = Number(w.occupied || 0);
+                const total = Number(w.total_beds || 0);
+                const pct = total ? w.occupancy_pct : 0;
+
+                return '<div class="mv-card ward-section">' +
+                    '<div class="ward-header">' +
+                      '<h3>' + MV.esc(w.ward_name) + '</h3>' +
+                      '<span class="ward-stat">' +
+                        '<strong>' + occupied + '/' + total + '</strong> occupied · ' +
+                        '<strong>' + pct + '%</strong>' +
+                      '</span>' +
+                    '</div>' +
+                    '<div class="bed-grid">' +
+                      beds.map(bedTile).join('') +
+                    '</div>' +
+                  '</div>';
+            }).join('');
+
+            MV.icons(slot);
+
+            // Attach click listeners
+            slot.querySelectorAll('.bed-tile').forEach(function (tile) {
+                tile.addEventListener('click', function () {
+                    const bedId = this.getAttribute('data-bed-id');
+                    openBedDrawer(bedId);
+                });
+            });
+
+        } catch (err) {
+            slot.innerHTML = MV.emptyState({ icon: 'wifi-off', title: 'Could not load wards', text: err.message });
+            MV.icons(slot);
+        } finally {
+            restore();
+        }
+    }
+
+    function bedTile(bed) {
+        const isAvail = bed.status === 'Available';
+        const isOccup = bed.status === 'Occupied';
+        const isClean = bed.status === 'Cleaning' || bed.status === 'Maintenance';
+        let cls = 'is-available';
+        if (isOccup) cls = 'is-occupied';
+        else if (isClean) cls = 'is-cleaning';
+
+        const label = isAvail ? 'Available' : isClean ? bed.status : (bed.patient_name || '--');
+
+        return '<div class="bed-tile ' + cls + '" data-bed-id="' + bed.bed_id + '" role="button" tabindex="0">' +
+            '<span class="bed-status-badge"></span>' +
+            '<div class="bed-number"><i class="fas fa-bed"></i> <span>' + MV.esc(bed.bed_number) + '</span></div>' +
+            '<div class="bed-patient">' + MV.esc(label) + '</div>' +
+            '</div>';
+    }
+
+    /* ----------------------------------------------------- bed drawer */
+    async function openBedDrawer(bedId) {
+        activeBedId = bedId;
+        const body = document.getElementById('bedDrawerBody');
+
+        body.innerHTML = '<div class="text-center py-5">' +
+            '<div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div>' +
+            '</div>';
+
+        drawerInstance.show();
+
+        try {
+            const bed = await MV.api.get('/api/admin/beds/' + bedId);
+            renderDrawer(bed);
+        } catch (err) {
+            body.innerHTML = MV.emptyState({ icon: 'alert-circle', title: 'Could not load bed', text: err.message });
+            MV.icons(body);
+        }
+    }
+
+    function renderDrawer(bed) {
+        const body = document.getElementById('bedDrawerBody');
+        const avail = bed.status === 'Available';
+
+        document.getElementById('bedDrawerLabel').textContent =
+            bed.ward_name + ' · ' + bed.bed_number;
+
+        let html = '<div class="mb-4">';
+        html += '<div class="mb-3"><strong>Status:</strong> ' + MV.badge(bed.status) + '</div>';
+        html += '<div class="mb-3"><strong>Ward:</strong> ' + MV.esc(bed.ward_name) + '</div>';
+        html += '<div class="mb-3"><strong>Bed Number:</strong> ' + MV.esc(bed.bed_number) + '</div>';
+
+        if (!avail && bed.patient_name) {
+            html += '<div class="mb-3"><strong>Patient:</strong> ' + MV.esc(bed.patient_name) + '</div>';
+            if (bed.patient_phone) html += '<div class="mb-3"><strong>Contact:</strong> ' + MV.esc(bed.patient_phone) + '</div>';
+            if (bed.patient_blood_group) html += '<div class="mb-3"><strong>Blood Group:</strong> ' + MV.esc(bed.patient_blood_group) + '</div>';
+        }
+
+        html += '</div>';
+
+        // Actions: assign if available, release if occupied
+        if (avail) {
+            html += '<button type="button" class="mv-btn mv-btn-primary w-100" id="assignBtn">' +
+                MV.icon('user-plus') + '<span>Assign Patient</span></button>';
+        } else {
+            html += '<button type="button" class="mv-btn mv-btn-danger w-100" id="releaseBtn">' +
+                MV.icon('user-minus') + '<span>Release Bed</span></button>';
+        }
+
+        body.innerHTML = html;
+        MV.icons(body);
+
+        if (avail) {
+            document.getElementById('assignBtn').addEventListener('click', function () {
+                assignBed(bed);
+            });
+        } else {
+            document.getElementById('releaseBtn').addEventListener('click', function () {
+                releaseBed(bed);
+            });
+        }
+    }
+
+    /* ------------------------------------------------ assign workflow */
+    async function assignBed(bed) {
+        const body = document.getElementById('bedDrawerBody');
+
+        // Simple patient search form
+        body.innerHTML = '<div class="mb-4">' +
+            '<label for="patientSearch" class="form-label">Search Patient</label>' +
+            '<input type="text" class="form-control" id="patientSearch" placeholder="Name or email..." autocomplete="off">' +
+            '<div id="patientResults" class="mt-3"></div>' +
+            '</div>' +
+            '<button type="button" class="mv-btn mv-btn-outline w-100" id="backBtn">' +
+              MV.icon('arrow-left') + '<span>Back</span>' +
+            '</button>';
+
+        MV.icons(body);
+
+        const search = document.getElementById('patientSearch');
+        const results = document.getElementById('patientResults');
+
+        document.getElementById('backBtn').addEventListener('click', function () {
+            openBedDrawer(activeBedId);
+        });
+
+        search.addEventListener('input', MV.debounce(async function () {
+            const q = search.value.trim();
+            if (q.length < 2) {
+                results.innerHTML = '';
+                return;
+            }
+
+            results.innerHTML = '<div class="text-center py-3"><div class="spinner-border spinner-border-sm" role="status"></div></div>';
+
+            try {
+                const patients = await MV.api.get('/api/admin/patients?q=' + encodeURIComponent(q));
+                if (!patients.length) {
+                    results.innerHTML = '<p class="text-muted mb-0">No patients found</p>';
+                    return;
+                }
+
+                results.innerHTML = '<div class="list-group">' +
+                    patients.slice(0, 5).map(function (p) {
+                        return '<button type="button" class="list-group-item list-group-item-action" data-patient-id="' + p.patient_id + '">' +
+                            '<div class="fw-semibold">' + MV.esc(p.name) + '</div>' +
+                            '<small class="text-muted">' + MV.esc(p.email) + '</small>' +
+                            '</button>';
+                    }).join('') +
+                    '</div>';
+
+                results.querySelectorAll('.list-group-item').forEach(function (item) {
+                    item.addEventListener('click', function () {
+                        const patientId = this.getAttribute('data-patient-id');
+                        confirmAssign(bed.bed_id, patientId);
+                    });
+                });
+
+            } catch (err) {
+                results.innerHTML = '<p class="text-danger mb-0">Search failed: ' + MV.esc(err.message) + '</p>';
+            }
+        }, 300));
+    }
+
+    async function confirmAssign(bedId, patientId) {
+        const ok = await MV.confirm('Assign this patient to the bed?');
+        if (!ok) return;
+
+        try {
+            await MV.api.patch('/api/admin/beds/' + bedId, { patient_id: patientId, status: 'Occupied' });
+            MV.toast.success('Bed assigned', 'Patient assigned to bed successfully');
+            drawerInstance.hide();
+            loadWards();
+        } catch (err) {
+            MV.toast.error('Assignment failed', err.message);
+        }
+    }
+
+    /* ----------------------------------------------- release workflow */
+    async function releaseBed(bed) {
+        const ok = await MV.confirm('Release this bed? The patient record will remain, but the bed will become available.');
+        if (!ok) return;
+
+        try {
+            await MV.api.patch('/api/admin/beds/' + bed.bed_id, { patient_id: null, status: 'Available' });
+            MV.toast.success('Bed released', 'Bed is now available');
+            drawerInstance.hide();
+            loadWards();
+        } catch (err) {
+            MV.toast.error('Release failed', err.message);
+        }
+    }
+})();
+</script>
+</body>
+</html>

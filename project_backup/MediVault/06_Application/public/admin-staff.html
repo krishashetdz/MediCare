@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Staff Management · MediCare</title>
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link href="/assets/css/medivault-restyle.css" rel="stylesheet">
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<script src="/assets/js/theme-init.js"></script>
+<script src="/runtime-config.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+<div class="mv-layout" id="mvShell"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/mv-core.js"></script>
+<script src="/assets/js/mv-shell.js"></script>
+<script>
+(function () {
+    'use strict';
+    (async function init() {
+        const ctx = await MV.shell.mount({ roles: ['Admin'], title: 'Staff Management', subtitle: 'All hospital staff by role' });
+
+        ctx.actions.innerHTML =
+            '<select class="form-select form-select-sm" id="roleFilter" style="width:auto">' +
+              '<option value="">All Roles</option>' +
+              '<option value="Doctor">Doctors</option>' +
+              '<option value="Nurse">Nurses</option>' +
+              '<option value="Lab Technician">Lab Technicians</option>' +
+              '<option value="Pharmacist">Pharmacists</option>' +
+              '<option value="Receptionist">Receptionists</option>' +
+            '</select>' +
+            '<button type="button" class="mv-btn mv-btn-outline" id="refreshBtn"><i class="fas fa-sync-alt"></i><span>Refresh</span></button>';
+
+        ctx.content.innerHTML =
+            '<div class="row g-3 mb-3" id="staffStats"></div>' +
+            '<div class="mv-card">' +
+              '<div class="mv-card-body" id="staffSlot"></div>' +
+            '</div>' +
+            '<div class="mv-footer">MediCare - Hospital Management System</div>';
+
+        document.getElementById('refreshBtn').addEventListener('click', function () { table.reload(); });
+        document.getElementById('roleFilter').addEventListener('change', function () { table.reload(); });
+
+        loadStaffStats();
+
+        const table = new MV.DataTable(document.getElementById('staffSlot'), {
+            columns: [
+                { key: 'user_id',    label: 'ID' },
+                { key: 'name',       label: 'Name' },
+                { key: 'email',      label: 'Email' },
+                { key: 'phone',      label: 'Phone' },
+                { key: 'role_name',  label: 'Role', render: function (r) { return '<span class="mv-badge is-info">' + MV.esc(r.role_name) + '</span>'; } },
+                { key: 'is_active',  label: 'Active', render: function (r) { return r.is_active ? '<span class="mv-badge is-success">Active</span>' : '<span class="mv-badge is-danger">Inactive</span>'; } }
+            ],
+            fetch: function () {
+                const role = document.getElementById('roleFilter').value;
+                const url = role ? '/api/admin/staff?role=' + encodeURIComponent(role) : '/api/admin/staff';
+                return MV.api.get(url);
+            },
+            searchKeys: ['name', 'email', 'role_name'],
+            pageSize: 15,
+            searchPlaceholder: 'Search staff...'
+        });
+    })();
+
+    async function loadStaffStats() {
+        try {
+            const rows = await MV.api.get('/api/admin/staff');
+            const counts = {};
+            rows.forEach(function (r) { counts[r.role_name] = (counts[r.role_name] || 0) + 1; });
+            const colors = { Doctor: 'info', Nurse: 'success', 'Lab Technician': 'warning', Pharmacist: 'primary', Receptionist: 'neutral' };
+            const container = document.getElementById('staffStats');
+            if (!container) return;
+            container.innerHTML = Object.entries(counts).map(function (e) {
+                const tone = colors[e[0]] || 'neutral';
+                return '<div class="col-6 col-md-4 col-xl-2"><div class="mv-stat">' +
+                    '<div class="mv-stat-top"><div><p class="mv-stat-label">' + MV.esc(e[0]) + '</p><p class="mv-stat-value">' + e[1] + '</p></div>' +
+                    '<span class="mv-stat-icon is-' + tone + '"><i class="fas fa-user-nurse"></i></span></div>' +
+                    '</div></div>';
+            }).join('');
+        } catch (err) { /* non-fatal */ }
+    }
+})();
+</script>
+</body>
+</html>

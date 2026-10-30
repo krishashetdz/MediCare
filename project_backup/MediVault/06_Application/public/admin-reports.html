@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reports · MediCare</title>
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link href="/assets/css/medivault-restyle.css" rel="stylesheet">
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<style>
+.reports-stat-card {
+    background: var(--mv-surface) !important;
+    border: 1px solid var(--mv-border) !important;
+    border-radius: 8px !important;
+    padding: 1.25rem 1.5rem !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05) !important;
+    height: 100% !important;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.reports-stat-card:hover {
+    border-color: var(--mv-border-strong) !important;
+}
+.stat-meta .stat-label {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--mv-text-muted);
+    margin-bottom: 6px;
+    display: block;
+}
+.stat-meta .stat-value {
+    font-size: 28px;
+    font-weight: 700;
+    margin: 0;
+    color: var(--mv-text);
+    line-height: 1.2;
+}
+.stat-icon-box {
+    width: 48px;
+    height: 48px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    flex-shrink: 0;
+}
+.stat-icon-box.is-primary { background: rgba(79, 142, 247, 0.12); color: #4f8ef7; }
+.stat-icon-box.is-info    { background: rgba(56, 189, 248, 0.12); color: #38bdf8; }
+.stat-icon-box.is-success { background: rgba(52, 211, 153, 0.12); color: #34d399; }
+.stat-icon-box.is-warning { background: rgba(245, 158, 11, 0.12); color: #f59e0b; }
+
+.mv-card {
+    background: var(--mv-surface) !important;
+    border: 1px solid var(--mv-border) !important;
+    border-radius: 8px !important;
+    overflow: hidden !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05) !important;
+    margin-bottom: 1.5rem !important;
+}
+.mv-card-head {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    padding: 16px 20px !important;
+    border-top: none !important;
+    border-bottom: 1px solid var(--mv-border) !important;
+    background: var(--mv-surface-1) !important;
+}
+.mv-card-head h2 {
+    font-size: 16px !important;
+    font-weight: 600 !important;
+    margin: 0 !important;
+    color: var(--mv-text) !important;
+}
+.mv-card-body {
+    padding: 20px !important;
+}
+.reports-chart-wrap {
+    position: relative;
+    height: 280px;
+    width: 100%;
+}
+.table-reports th {
+    padding: 12px 20px !important;
+    font-size: 12px !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.5px !important;
+    color: var(--mv-text-muted) !important;
+    border-bottom: 1px solid var(--mv-border) !important;
+    background: var(--mv-surface-1) !important;
+    font-weight: 600 !important;
+}
+.table-reports td {
+    padding: 14px 20px !important;
+    border-bottom: 1px solid var(--mv-border) !important;
+    font-size: 14px !important;
+    color: var(--mv-text) !important;
+}
+.table-reports tr:last-child td {
+    border-bottom: none !important;
+}
+</style>
+<script src="/assets/js/theme-init.js"></script>
+<script src="/runtime-config.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+<div class="mv-layout" id="mvShell"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/chart.umd.min.js"></script>
+<script src="/assets/js/mv-core.js"></script>
+<script src="/assets/js/mv-shell.js"></script>
+<script>
+(function () {
+    'use strict';
+    const charts = {};
+
+    (async function init() {
+        const ctx = await MV.shell.mount({ roles: ['Admin'], title: 'Reports', subtitle: 'Hospital analytics & summaries' });
+
+        ctx.actions.innerHTML =
+            '<button type="button" class="mv-btn mv-btn-outline" id="refreshBtn"><i class="fas fa-sync-alt"></i><span>Refresh</span></button>';
+
+        ctx.content.innerHTML =
+            '<!-- Row 1: KPI Stats -->' +
+            '<div class="row g-3 mb-4">' +
+              '<div class="col-sm-6 col-xl-3">' +
+                '<div class="reports-stat-card">' +
+                  '<div class="stat-meta">' +
+                    '<span class="stat-label">Total Patients</span>' +
+                    '<h3 class="stat-value" id="rPatients">-</h3>' +
+                  '</div>' +
+                  '<div class="stat-icon-box is-primary"><i class="fas fa-users"></i></div>' +
+                '</div>' +
+              '</div>' +
+              '<div class="col-sm-6 col-xl-3">' +
+                '<div class="reports-stat-card">' +
+                  '<div class="stat-meta">' +
+                    '<span class="stat-label">Total Doctors</span>' +
+                    '<h3 class="stat-value" id="rDoctors">-</h3>' +
+                  '</div>' +
+                  '<div class="stat-icon-box is-info"><i class="fas fa-user-doctor"></i></div>' +
+                '</div>' +
+              '</div>' +
+              '<div class="col-sm-6 col-xl-3">' +
+                '<div class="reports-stat-card">' +
+                  '<div class="stat-meta">' +
+                    '<span class="stat-label">Total Appointments</span>' +
+                    '<h3 class="stat-value" id="rAppts">-</h3>' +
+                  '</div>' +
+                  '<div class="stat-icon-box is-success"><i class="fas fa-calendar-check"></i></div>' +
+                '</div>' +
+              '</div>' +
+              '<div class="col-sm-6 col-xl-3">' +
+                '<div class="reports-stat-card">' +
+                  '<div class="stat-meta">' +
+                    '<span class="stat-label">Available Beds</span>' +
+                    '<h3 class="stat-value" id="rBeds">-</h3>' +
+                  '</div>' +
+                  '<div class="stat-icon-box is-warning"><i class="fas fa-bed"></i></div>' +
+                '</div>' +
+              '</div>' +
+            '</div>' +
+
+            '<!-- Row 2: Analytics Charts (50/50 Balanced) -->' +
+            '<div class="row g-3 mb-4">' +
+              '<div class="col-lg-6 col-12">' +
+                '<div class="mv-card h-100">' +
+                  '<div class="mv-card-head">' +
+                    '<div class="d-flex align-items-center gap-2">' +
+                      '<i class="fas fa-chart-line text-primary"></i>' +
+                      '<h2>Monthly Revenue</h2>' +
+                    '</div>' +
+                  '</div>' +
+                  '<div class="mv-card-body">' +
+                    '<div class="reports-chart-wrap"><canvas id="revenueChart"></canvas></div>' +
+                  '</div>' +
+                '</div>' +
+              '</div>' +
+              '<div class="col-lg-6 col-12">' +
+                '<div class="mv-card h-100">' +
+                  '<div class="mv-card-head">' +
+                    '<div class="d-flex align-items-center gap-2">' +
+                      '<i class="fas fa-chart-pie text-success"></i>' +
+                      '<h2>Appointments by Department</h2>' +
+                    '</div>' +
+                  '</div>' +
+                  '<div class="mv-card-body">' +
+                    '<div class="reports-chart-wrap"><canvas id="deptChart"></canvas></div>' +
+                  '</div>' +
+                '</div>' +
+              '</div>' +
+            '</div>' +
+
+            '<!-- Row 3: Occupancy Table -->' +
+            '<div class="mv-card mb-4">' +
+              '<div class="mv-card-head">' +
+                '<div class="d-flex align-items-center gap-2">' +
+                  '<i class="fas fa-bed text-info"></i>' +
+                  '<h2>Bed Occupancy by Ward</h2>' +
+                '</div>' +
+              '</div>' +
+              '<div class="table-responsive" id="occupancyTable"></div>' +
+            '</div>' +
+            '<div class="mv-footer">MediCare - Hospital Management System</div>';
+
+        document.getElementById('refreshBtn').addEventListener('click', loadAll);
+        loadAll();
+    })();
+
+    async function loadAll() {
+        try {
+            const d = await MV.api.get('/api/admin/dashboard');
+            const set = function (id, val) { const n = document.getElementById(id); if (n) n.textContent = MV.fmt.numberIndian(val); };
+            set('rPatients', d.total_patients);
+            set('rDoctors',  d.total_doctors);
+            set('rAppts',    d.total_appointments);
+            set('rBeds',     d.available_beds);
+            try { paintRevenue(d.monthly_revenue || []); } catch (e) { console.error('Revenue chart err:', e); }
+            try { paintOccupancy(d.bed_occupancy || []); } catch (e) { console.error('Occupancy table err:', e); }
+        } catch (err) {
+            console.error('Failed to load dashboard data:', err);
+            MV.toast.error('Failed to load reports', err.message);
+        }
+
+        try {
+            const rows = await MV.api.get('/api/admin/appointments/by-department');
+            try { paintDept(rows); } catch (e) { console.error('Dept chart err:', e); }
+        } catch (err) { /* non-fatal */ }
+    }
+
+    function paintRevenue(rows) {
+        const canvas = document.getElementById('revenueChart');
+        if (!canvas || typeof Chart === 'undefined') return;
+        const sorted = rows.slice().sort(function (a, b) { return String(a.month).localeCompare(String(b.month)); });
+        if (charts.revenue) charts.revenue.destroy();
+        charts.revenue = new Chart(canvas, {
+            type: 'line',
+            data: {
+                labels: sorted.map(function (r) { return MV.fmt.monthShort(r.month); }),
+                datasets: [{ label: 'Revenue (₹)', data: sorted.map(function (r) { return Number(r.revenue || 0); }),
+                    tension: 0.3, fill: true, borderColor: '#4f8ef7', backgroundColor: 'rgba(79,142,247,0.12)', borderWidth: 2, pointRadius: 4 }]
+            },
+            options: { responsive: true, maintainAspectRatio: false,
+                plugins: { legend: { display: false }, tooltip: { callbacks: { label: function (i) { return ' ₹' + MV.fmt.numberIndian(i.parsed.y); } } } },
+                scales: { y: { beginAtZero: true, ticks: { callback: function (v) { return '₹' + MV.fmt.numberIndian(v); } } } }
+            }
+        });
+    }
+
+    function paintDept(rows) {
+        const canvas = document.getElementById('deptChart');
+        if (!canvas || typeof Chart === 'undefined') return;
+        if (charts.dept) charts.dept.destroy();
+        charts.dept = new Chart(canvas, {
+            type: 'doughnut',
+            data: {
+                labels: rows.map(function (r) { return r.department_name; }),
+                datasets: [{ data: rows.map(function (r) { return r.count; }),
+                    backgroundColor: ['#4f8ef7','#34d399','#f59e0b','#f87171','#a78bfa','#38bdf8','#fb923c'] }]
+            },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right' } } }
+        });
+    }
+
+    function paintOccupancy(rows) {
+        const container = document.getElementById('occupancyTable');
+        if (!container) return;
+        if (!rows.length) { container.innerHTML = '<div class="mv-empty p-4 text-center"><p class="mv-empty-text">No occupancy data</p></div>'; return; }
+        container.innerHTML =
+            '<table class="table table-reports table-hover align-middle mb-0">' +
+              '<thead><tr><th>Ward</th><th>Total Beds</th><th>Occupied</th><th>Available</th><th>Occupancy %</th></tr></thead>' +
+              '<tbody>' + rows.map(function (r) {
+                const pct = r.total_beds > 0 ? Math.round((r.occupied / r.total_beds) * 100) : 0;
+                const tone = pct > 80 ? 'danger' : pct > 60 ? 'warning' : 'success';
+                return '<tr>' +
+                    '<td><strong>' + MV.esc(r.ward_name || r.department_name || '-') + '</strong></td>' +
+                    '<td>' + (r.total_beds || 0) + '</td>' +
+                    '<td>' + (r.occupied || 0) + '</td>' +
+                    '<td>' + ((r.total_beds || 0) - (r.occupied || 0)) + '</td>' +
+                    '<td><span class="mv-badge is-' + tone + '">' + pct + '%</span></td></tr>';
+              }).join('') + '</tbody></table>';
+    }
+})();
+</script>
+</body>
+</html>

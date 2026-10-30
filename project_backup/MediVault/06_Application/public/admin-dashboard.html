@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard · MediCare</title>
+
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link href="/assets/css/medivault-restyle.css" rel="stylesheet">
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<style>
+.mv-stat {
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: space-between !important;
+    height: 100% !important;
+    min-height: 106px !important;
+}
+.mv-stat-top {
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: flex-start !important;
+    width: 100% !important;
+}
+.ward-grid-hero {
+    display: grid !important;
+    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)) !important;
+    gap: 12px !important;
+    padding: 1.25rem !important;
+}
+</style>
+<script src="/assets/js/theme-init.js"></script>
+<script src="/runtime-config.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+
+<div class="mv-layout" id="mvShell"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/chart.umd.min.js"></script>
+<script src="/assets/js/mv-core.js"></script>
+<script src="/assets/js/mv-shell.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    /* Admin dashboard - hero element is the ward bed grid visualization */
+
+    const charts = {};
+
+    function statCard(cfg) {
+        return '' +
+        '<div class="col-6 col-md-4 col-xl-3">' +
+          '<div class="mv-stat">' +
+            '<div class="mv-stat-top">' +
+              '<div>' +
+                '<p class="mv-stat-label">' + MV.esc(cfg.label) + '</p>' +
+                '<p class="mv-stat-value" data-stat="' + MV.esc(cfg.key) + '">'
+                  + '<span class="mv-skeleton d-inline-block" style="width:52px;height:32px"></span>' +
+                '</p>' +
+              '</div>' +
+              '<span class="mv-stat-icon is-' + MV.esc(cfg.tone) + '">' + MV.icon(cfg.icon) + '</span>' +
+            '</div>' +
+            '<p class="mv-stat-note" data-stat-note="' + MV.esc(cfg.key) + '"></p>' +
+          '</div>' +
+        '</div>';
+    }
+
+    const STATS = [
+        { key: 'patients',     label: 'Total Patients',  icon: 'users',       tone: 'primary' },
+        { key: 'doctors',      label: 'Doctors',         icon: 'user-doctor', tone: 'info' },
+        { key: 'appointments', label: 'Appointments',    icon: 'calendar',    tone: 'primary' },
+        { key: 'emergency',    label: 'Emergencies',     icon: 'siren',       tone: 'danger' },
+        { key: 'beds',         label: 'Available Beds',  icon: 'bed',         tone: 'success' },
+        { key: 'labs',         label: 'Pending Reports', icon: 'flask',       tone: 'warning' },
+        { key: 'lowStock',     label: 'Low Stock Meds',  icon: 'pills',       tone: 'danger' },
+        { key: 'ambulance',    label: 'Ambulances Free', icon: 'ambulance',   tone: 'info' }
+    ];
+
+    (async function init() {
+        const ctx = await MV.shell.mount({
+            roles: ['Admin'],
+            title: 'Dashboard',
+            subtitle: 'Hospital Overview'
+        });
+
+        ctx.actions.innerHTML =
+            '<button type="button" class="mv-btn mv-btn-outline" id="refreshBtn">' +
+              '<i class="fas fa-sync-alt"></i><span>Refresh</span>' +
+            '</button>';
+
+        ctx.content.innerHTML = '' +
+        '<div class="row g-3 mb-3" id="statGrid">' + STATS.map(statCard).join('') + '</div>' +
+
+        // HERO: Ward bed grid
+        '<div class="mv-card mb-3">' +
+          '<div class="mv-card-head">' +
+            '<h2>Ward Bed Status (Live)</h2>' +
+            '<span class="mv-badge is-neutral" id="bedSummary">Loading...</span>' +
+          '</div>' +
+          '<div id="wardGridContainer"></div>' +
+        '</div>' +
+
+        '<div class="row g-3 mb-3">' +
+          '<div class="col-xl-8">' +
+            '<div class="mv-card h-100">' +
+              '<div class="mv-card-head"><h2>Monthly Revenue</h2></div>' +
+              '<div class="mv-card-body">' +
+                '<div class="mv-chart"><canvas id="revenueChart"></canvas></div>' +
+                '<div id="revenueFallback"></div>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+          '<div class="col-xl-4">' +
+            '<div class="mv-card h-100">' +
+              '<div class="mv-card-head">' +
+                '<h2>Alerts</h2>' +
+                '<span class="mv-badge is-neutral" id="alertCount">0</span>' +
+              '</div>' +
+              '<div class="mv-feed" id="alertFeed"></div>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+
+        '<div class="mv-card">' +
+          '<div class="mv-card-head"><h2>Recent Appointments</h2></div>' +
+          '<div class="mv-card-body" id="recentSlot"></div>' +
+        '</div>' +
+
+        '<div class="mv-footer">' +
+          'MediCare - Hospital Management System' +
+        '</div>';
+
+        document.getElementById('refreshBtn').addEventListener('click', function () {
+            loadDashboard(this);
+            loadWardGrid();
+        });
+
+        const recentTable = new MV.DataTable(document.getElementById('recentSlot'), {
+            columns: [
+                { key: 'patient_name', label: 'Patient' },
+                { key: 'doctor_name', label: 'Doctor' },
+                { key: 'department_name', label: 'Department' },
+                { key: 'appointment_date', label: 'Date', render: function (r) { return MV.fmt.dateIndian(r.appointment_date); } },
+                { key: 'appointment_time', label: 'Time', render: function (r) { return MV.fmt.time12(r.appointment_time); } },
+                { key: 'status', label: 'Status', render: function (r) { return MV.badge(r.status); } }
+            ],
+            fetch: function () { return MV.api.get('/api/admin/appointments?limit=10'); },
+            searchKeys: ['patient_name', 'doctor_name', 'department_name'],
+            pageSize: 10,
+            searchPlaceholder: 'Search appointments...'
+        });
+
+        loadDashboard();
+        loadWardGrid();
+        loadAlerts();
+    })();
+
+    async function loadDashboard(button) {
+        const restore = button ? MV.pending(button, 'Refreshing...') : function () {};
+        try {
+            const d = await MV.api.get('/api/admin/dashboard');
+            paintStats(d);
+            paintRevenue(d.monthly_revenue || []);
+        } catch (err) {
+            document.querySelectorAll('[data-stat]').forEach(function (node) {
+                if (node.querySelector('.mv-skeleton')) node.textContent = '--';
+            });
+            MV.toast.error('Could not load dashboard', err.message);
+        } finally {
+            restore();
+        }
+    }
+
+    function setStat(key, value, note) {
+        const val = document.querySelector('[data-stat="' + key + '"]');
+        if (val) val.textContent = MV.fmt.numberIndian(value);
+        const noteNode = document.querySelector('[data-stat-note="' + key + '"]');
+        if (noteNode && note !== undefined) noteNode.innerHTML = note;
+    }
+
+    function paintStats(d) {
+        setStat('patients', d.total_patients, 'Registered');
+        setStat('doctors', d.total_doctors, 'All departments');
+        setStat('appointments', d.total_appointments, 'All time');
+        setStat('beds', d.available_beds, '');
+
+        MV.api.get('/api/admin/emergencies/count').then(r => setStat('emergency', r.count, r.count > 0 ? 'Active in ER' : 'ER clear')).catch(() => setStat('emergency', 0, 'ER clear'));
+
+        const labs = Number(d.pending_lab_reports || 0);
+        setStat('labs', labs, labs > 0 ? 'Awaiting results' : 'Queue clear');
+
+        const low = Number(d.low_stock_medicines || 0);
+        setStat('lowStock', low, low > 0 ? 'Below 20 units' : 'Stock OK');
+
+        MV.api.get('/api/admin/ambulances/available').then(r=>setStat('ambulance',r.count,'Available for dispatch')).catch(()=>setStat('ambulance',null,'Unavailable'));
+    }
+
+    // HERO ELEMENT: Ward bed grid
+    async function loadWardGrid() {
+        const container = document.getElementById('wardGridContainer');
+        const summary = document.getElementById('bedSummary');
+
+        try {
+            const beds = await MV.api.get('/api/admin/beds');
+
+            if (!beds.length) {
+                container.innerHTML = '<div class="mv-empty"><div class="mv-empty-icon"><i class="fas fa-bed"></i></div>' +
+                    '<p class="mv-empty-title">No beds configured</p></div>';
+                summary.textContent = '0 beds';
+                return;
+            }
+
+            const occupied = beds.filter(b => b.status === 'Occupied').length;
+            const available = beds.length - occupied;
+
+            summary.className = 'mv-badge is-' + (occupied > beds.length * 0.8 ? 'danger' : 'success');
+            summary.textContent = occupied + ' occupied · ' + available + ' free';
+
+            let html = '<div class="ward-grid-hero">';
+            beds.forEach(function (bed) {
+                const statusClass = bed.status === 'Available' ? 'available' : 'occupied';
+                const statusText = bed.status === 'Available' ? 'Free' : 'Busy';
+                html += '<div class="bed-tile-hero ' + statusClass + '" title="' + MV.esc(bed.ward_name + ' - ' + bed.bed_number) + '">'
+                    + '<div class="bed-number">' + MV.esc(bed.bed_number) + '</div>'
+                    + '<div class="bed-status">' + statusText + '</div>'
+                  + '</div>';
+            });
+            html += '</div>';
+
+            container.innerHTML = html;
+        } catch (err) {
+            container.innerHTML = '<div class="mv-empty"><p class="mv-empty-text">Could not load ward grid</p></div>';
+            summary.textContent = 'Error';
+        }
+    }
+
+    function paintRevenue(rows) {
+        const canvas = document.getElementById('revenueChart');
+        const wrap = document.getElementById('revenueFallback');
+
+        if (!rows.length) {
+            canvas.parentElement.classList.add('d-none');
+            wrap.innerHTML = '<div class="mv-empty"><div class="mv-empty-icon"><i class="fas fa-chart-line"></i></div>' +
+                '<p class="mv-empty-title">No billing history</p><p class="mv-empty-text">Revenue appears once bills are generated</p></div>';
+            return;
+        }
+
+        canvas.parentElement.classList.remove('d-none');
+        wrap.innerHTML = '';
+
+        const sorted = rows.slice().sort(function (a, b) { return String(a.month).localeCompare(String(b.month)); });
+        const labels = sorted.map(function (r) { return MV.fmt.monthShort(r.month); });
+        const values = sorted.map(function (r) { return Number(r.revenue || 0); });
+
+        if (charts.revenue) charts.revenue.destroy();
+        charts.revenue = new Chart(canvas, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Revenue',
+                    data: values,
+                    tension: 0.3,
+                    fill: false,
+                    borderColor: '#5D6965',
+                    backgroundColor: '#5D6965',
+                    borderWidth: 2,
+                    pointRadius: 4
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            label: function (item) { return ' ₹' + MV.fmt.numberIndian(item.parsed.y); }
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: {
+                            callback: function (value) { return '₹' + MV.fmt.numberIndian(value); }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    async function loadAlerts() {
+        const feed = document.getElementById('alertFeed');
+        const count = document.getElementById('alertCount');
+
+        feed.innerHTML = ['', '', ''].map(function () {
+            return '<div class="mv-feed-item">' +
+                '<span class="mv-skeleton" style="width:32px;height:32px;border-radius:6px"></span>' +
+                '<span class="flex-grow-1"><span class="mv-skeleton d-block mb-2" style="width:80%"></span>' +
+                '<span class="mv-skeleton d-block" style="width:34%"></span></span>' +
+                '</div>';
+        }).join('');
+
+        try {
+            const rows = await MV.api.get('/api/admin/notifications');
+            render(rows || []);
+        } catch (err) {
+            count.hidden = true;
+            feed.innerHTML = '<div class="mv-empty"><p class="mv-empty-text">Alerts unavailable</p></div>';
+        }
+
+        function render(rows) {
+            const unread = rows.filter(function (r) { return !r.is_read; }).length;
+            count.className = 'mv-badge is-' + (unread ? 'danger' : 'neutral');
+            count.textContent = unread ? unread + ' new' : rows.length;
+
+            if (!rows.length) {
+                feed.innerHTML = '<div class="mv-empty"><div class="mv-empty-icon"><i class="fas fa-bell"></i></div>' +
+                    '<p class="mv-empty-title">No alerts</p></div>';
+                return;
+            }
+
+            feed.innerHTML = rows.slice(0, 25).map(function (n) {
+                const icon = getAlertIcon(n.message);
+                return '<div class="mv-feed-item">' +
+                    '<span class="mv-feed-icon is-' + icon.tone + '"><i class="' + icon.class + '"></i></span>' +
+                    '<span class="mv-feed-body">' +
+                      '<span class="mv-feed-text">' + MV.esc(n.message) + '</span>' +
+                      '<span class="mv-feed-time">' + MV.fmt.relative(n.created_at) + '</span>' +
+                    '</span>' +
+                    '</div>';
+            }).join('');
+        }
+    }
+
+    function getAlertIcon(message) {
+        if (/low stock|units left/i.test(message)) return { class: 'fas fa-box', tone: 'danger' };
+        if (/expir/i.test(message)) return { class: 'fas fa-calendar-xmark', tone: 'warning' };
+        if (/emergenc/i.test(message)) return { class: 'fas fa-truck-medical', tone: 'danger' };
+        if (/appointment/i.test(message)) return { class: 'fas fa-calendar-check', tone: 'info' };
+        return { class: 'fas fa-bell', tone: '' };
+    }
+})();
+</script>
+</body>
+</html>

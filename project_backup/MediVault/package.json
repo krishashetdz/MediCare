@@ -1,0 +1,10 @@
+{
+  "name": "medivault",
+  "version": "1.0.0",
+  "description": "MediVault - Hybrid MySQL + MongoDB Hospital Management System",
+  "scripts": {
+    "start": "npm start --prefix 06_Application",
+    "dev": "npm start --prefix 06_Application",
+    "install:app": "npm install --prefix 06_Application"
+  }
+}

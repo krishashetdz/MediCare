@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Appointments · MediCare</title>
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link href="/assets/css/medivault-restyle.css" rel="stylesheet">
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<script src="/assets/js/theme-init.js"></script>
+<script src="/runtime-config.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+<div class="mv-layout" id="mvShell"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/mv-core.js"></script>
+<script src="/assets/js/mv-shell.js"></script>
+<script>
+(function () {
+    'use strict';
+    (async function init() {
+        const ctx = await MV.shell.mount({ roles: ['Admin'], title: 'Appointments', subtitle: 'All appointment records' });
+
+        ctx.actions.innerHTML =
+            '<select class="form-select form-select-sm" id="statusFilter" style="width:auto">' +
+              '<option value="">All Statuses</option>' +
+              '<option value="Scheduled">Scheduled</option>' +
+              '<option value="Completed">Completed</option>' +
+              '<option value="Cancelled">Cancelled</option>' +
+            '</select>' +
+            '<button type="button" class="mv-btn mv-btn-outline" id="refreshBtn"><i class="fas fa-sync-alt"></i><span>Refresh</span></button>';
+
+        ctx.content.innerHTML =
+            '<div class="row g-3 mb-3">' +
+              '<div class="col-md-4"><div class="mv-stat"><div class="mv-stat-top"><div><p class="mv-stat-label">Total Appointments</p><p class="mv-stat-value" id="statTotal">-</p></div><span class="mv-stat-icon is-primary"><i class="fas fa-calendar-check"></i></span></div></div></div>' +
+              '<div class="col-md-4"><div class="mv-stat"><div class="mv-stat-top"><div><p class="mv-stat-label">Scheduled</p><p class="mv-stat-value" id="statScheduled">-</p></div><span class="mv-stat-icon is-info"><i class="fas fa-clock"></i></span></div></div></div>' +
+              '<div class="col-md-4"><div class="mv-stat"><div class="mv-stat-top"><div><p class="mv-stat-label">Completed</p><p class="mv-stat-value" id="statCompleted">-</p></div><span class="mv-stat-icon is-success"><i class="fas fa-check-circle"></i></span></div></div></div>' +
+            '</div>' +
+            '<div class="mv-card">' +
+              '<div class="mv-card-body" id="apptSlot"></div>' +
+            '</div>' +
+            '<div class="mv-footer">MediCare - Hospital Management System</div>';
+
+        document.getElementById('refreshBtn').addEventListener('click', function () { table.reload(); loadStats(); });
+        document.getElementById('statusFilter').addEventListener('change', function () { table.reload(); });
+
+        const table = new MV.DataTable(document.getElementById('apptSlot'), {
+            columns: [
+                { key: 'appointment_id', label: 'ID' },
+                { key: 'patient_name',   label: 'Patient' },
+                { key: 'doctor_name',    label: 'Doctor' },
+                { key: 'department_name',label: 'Department' },
+                { key: 'appointment_date',label: 'Date', render: function (r) { return MV.fmt.dateIndian(r.appointment_date); } },
+                { key: 'appointment_time',label: 'Time', render: function (r) { return MV.fmt.time12(r.appointment_time); } },
+                { key: 'status',         label: 'Status', render: function (r) { return MV.badge(r.status); } }
+            ],
+            fetch: function () {
+                const status = document.getElementById('statusFilter').value;
+                const url = status ? '/api/admin/appointments?limit=200&status=' + encodeURIComponent(status) : '/api/admin/appointments?limit=200';
+                return MV.api.get(url);
+            },
+            searchKeys: ['patient_name', 'doctor_name', 'department_name', 'status'],
+            pageSize: 20,
+            searchPlaceholder: 'Search appointments...'
+        });
+
+        loadStats();
+    })();
+
+    async function loadStats() {
+        try {
+            const d = await MV.api.get('/api/admin/dashboard');
+            const el = function (id, val) { const n = document.getElementById(id); if (n) n.textContent = MV.fmt.numberIndian(val); };
+            el('statTotal', d.total_appointments);
+        } catch (err) { /* non-fatal */ }
+
+        try {
+            const rows = await MV.api.get('/api/admin/appointments?limit=500');
+            const scheduled = rows.filter(function (r) { return r.status === 'Scheduled'; }).length;
+            const completed = rows.filter(function (r) { return r.status === 'Completed'; }).length;
+            const elS = document.getElementById('statScheduled');
+            const elC = document.getElementById('statCompleted');
+            if (elS) elS.textContent = scheduled;
+            if (elC) elC.textContent = completed;
+        } catch (err) { /* non-fatal */ }
+    }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,1182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Staff Portal — MediCare</title>
+
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link href="/assets/css/medivault-restyle.css" rel="stylesheet">
+<style>
+.role-tabs {
+    display: flex; gap: .5rem; margin-bottom: 1.5rem; border-bottom: 2px solid var(--mv-border);
+    flex-wrap: wrap;
+}
+.role-tab {
+    padding: .625rem 1.25rem; background: transparent; border: none; border-bottom: 2px solid transparent;
+    font-weight: 600; font-size: 13.5px; color: var(--mv-text-muted); cursor: pointer; transition: all .2s ease;
+    margin-bottom: -2px; display: inline-flex; align-items: center; gap: 8px;
+    border-radius: var(--mv-radius-sm) var(--mv-radius-sm) 0 0;
+}
+.role-tab:hover { color: var(--mv-primary); background: var(--mv-surface-1); }
+.role-tab.active { color: var(--mv-primary); border-bottom-color: var(--mv-primary); background: var(--mv-surface); }
+.ward-board {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: .75rem;
+}
+.bed-tile {
+    border-radius: var(--mv-radius-lg); border: 2px solid var(--mv-border);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer;
+    transition: all .2s ease; padding: .875rem; min-height: 100px;
+}
+.bed-tile:hover { transform: translateY(-2px); box-shadow: var(--mv-shadow-md); }
+.bed-tile.available { background: rgba(22, 163, 74, .1); border-color: var(--mv-success); color: var(--mv-text); }
+.bed-tile.occupied { background: rgba(220, 38, 38, .1); border-color: var(--mv-danger); color: var(--mv-text); }
+.bed-tile .bed-number { font-size: 1.25rem; font-weight: 700; }
+.bed-tile .bed-status { font-size: .75rem; margin-top: .25rem; font-weight: 600; }
+.queue-card {
+    padding: 1rem; background: var(--mv-surface-0); border-radius: var(--mv-radius-xl); border: 1px solid var(--mv-border);
+    margin-bottom: .75rem; cursor: pointer; transition: all .2s ease;
+}
+.queue-card:hover { box-shadow: var(--mv-shadow-md); }
+.queue-card h6 { font-size: .875rem; font-weight: 600; margin: 0 0 .5rem; }
+.queue-card p { font-size: .8125rem; color: var(--mv-text-muted); margin: .25rem 0; }
+.rx-preview {
+    background: var(--mv-surface-1); border-radius: var(--mv-radius-lg); padding: .75rem; margin-top: .75rem;
+}
+.rx-preview-item {
+    display: flex; justify-content: space-between; align-items: center; padding: .5rem 0; border-bottom: 1px solid var(--mv-border);
+}
+.rx-preview-item:last-child { border-bottom: none; }
+.rx-preview-item span { font-size: .8125rem; }
+.rx-preview-item .medicine { font-weight: 600; }
+.rx-preview-item .stock { color: var(--mv-text-muted); }
+.rx-preview-item .stock.low { color: var(--mv-danger); font-weight: 600; }
+.vitals-pill {
+    display: inline-flex; align-items: center; gap: .25rem; padding: .2rem .5rem; border-radius: var(--mv-radius-pill);
+    background: var(--mv-surface-1); font-size: .75rem; font-weight: 600;
+}
+</style>
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<script src="/assets/js/theme-init.js"></script>
+<script src="/runtime-config.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+
+<div class="mv-layout" id="mvShell"></div>
+
+<!-- Nurse Modals -->
+<div class="modal fade" id="nurseVitalsModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="fas fa-heart-pulse text-danger me-2"></i>Record Patient Vitals</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="nurseVitalsForm">
+                    <input type="hidden" id="nvPatientId" name="patient_id">
+                    <div class="mb-3">
+                        <label class="form-label">Patient</label>
+                        <input type="text" class="form-control" id="nvPatientName" readonly>
+                    </div>
+                    <div class="row g-3 mb-3">
+                        <div class="col-6">
+                            <label class="form-label">Systolic BP</label>
+                            <input type="number" class="form-control" name="bp_systolic" placeholder="120" min="40" max="260">
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label">Diastolic BP</label>
+                            <input type="number" class="form-control" name="bp_diastolic" placeholder="80" min="20" max="180">
+                        </div>
+                    </div>
+                    <div class="row g-3 mb-3">
+                        <div class="col-6">
+                            <label class="form-label">Heart Rate (BPM)</label>
+                            <input type="number" class="form-control" name="heart_rate" placeholder="75">
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label">SpO2 (%)</label>
+                            <input type="number" class="form-control" name="spo2" placeholder="98" min="50" max="100">
+                        </div>
+                    </div>
+                    <div class="row g-3 mb-3">
+                        <div class="col-6">
+                            <label class="form-label">Temperature (°F)</label>
+                            <input type="number" step="0.1" class="form-control" name="temperature" placeholder="98.6">
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label">Respiratory Rate</label>
+                            <input type="number" class="form-control" name="respiratory_rate" placeholder="18">
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Clinical Observation Notes</label>
+                        <textarea class="form-control" name="notes" rows="2" placeholder="Patient calm, resting in bed, IV infusing well..."></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="mv-btn mv-btn-outline" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="mv-btn mv-btn-primary" id="submitNurseVitalsBtn">Save Vitals</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="nurseNotesModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="fas fa-clipboard-user me-2"></i>Add Nursing Care Note</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="nurseNotesForm">
+                    <input type="hidden" id="nnPatientId" name="patient_id">
+                    <div class="mb-3">
+                        <label class="form-label">Patient</label>
+                        <input type="text" class="form-control" id="nnPatientName" readonly>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Note Category</label>
+                        <select class="form-select" name="note_type">
+                            <option value="General">General Nursing Note</option>
+                            <option value="Medication Given">Medication Administered</option>
+                            <option value="Vitals Check">Vitals & Assessment</option>
+                            <option value="Shift Handover">Shift Handover Note</option>
+                            <option value="Incident">Clinical Incident / Flare</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Observation & Nursing Plan</label>
+                        <textarea class="form-control" name="content" rows="3" required placeholder="Record patient status, medication schedule compliance, fluid intake/output..."></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="mv-btn mv-btn-outline" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="mv-btn mv-btn-primary" id="submitNurseNotesBtn">Record Note</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="nurseTransferModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="fas fa-right-left me-2"></i>Bed / Ward Transfer Request</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="nurseTransferForm">
+                    <input type="hidden" id="ntPatientId" name="patient_id">
+                    <input type="hidden" id="ntCurrentBedId" name="current_bed_id">
+                    <div class="mb-3">
+                        <label class="form-label">Patient</label>
+                        <input type="text" class="form-control" id="ntPatientName" readonly>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Current Bed</label>
+                        <input type="text" class="form-control" id="ntCurrentBedName" readonly>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Select Available Target Bed</label>
+                        <select class="form-select" id="ntTargetBedSelect" name="new_bed_id" required>
+                            <option value="">Choose available bed...</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Clinical Transfer Reason</label>
+                        <textarea class="form-control" name="reason" rows="2" placeholder="e.g. Stepped down from ICU, transfer to pediatric ward..."></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="mv-btn mv-btn-outline" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="mv-btn mv-btn-primary" id="submitNurseTransferBtn">Execute Transfer</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Assign Inpatient Bed Modal for Doctor Admission Requests -->
+<div class="modal fade" id="assignAdmissionBedModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="fas fa-bed text-warning me-2"></i>Assign Inpatient Bed</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="assignAdmissionBedForm">
+                    <input type="hidden" id="aabRequestId" name="request_id">
+                    <input type="hidden" id="aabPatientId" name="patient_id">
+                    <div class="mb-3">
+                        <label class="form-label">Patient</label>
+                        <input type="text" class="form-control" id="aabPatientName" readonly>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Doctor Recommended Ward & Priority</label>
+                        <input type="text" class="form-control" id="aabRecommendedWard" readonly>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Clinical Admission Reason</label>
+                        <div id="aabReason" class="p-2 border rounded" style="font-size:13px;background:var(--mv-surface-1)"></div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Select Available Bed <span class="text-danger">*</span></label>
+                        <select class="form-select" id="aabBedSelect" name="bed_id" required>
+                            <option value="">Choose available bed...</option>
+                        </select>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="mv-btn mv-btn-outline" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="mv-btn mv-btn-primary" id="confirmAssignAdmissionBedBtn">Confirm Bed Assignment</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/mv-core.js"></script>
+<script src="/assets/js/mv-shell.js"></script>
+<script src="/assets/js/reception-billing.js"></script>
+<script src="/assets/js/dispense-record.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    let userRole = '';
+    let activeView = '';
+
+    let beds = [];
+    let pendingRequests = [];
+    let completedReports = [];
+    let pendingPrescriptions = [];
+    let inventory = [];
+
+    // Modals
+    let nurseVitalsModalInst, nurseNotesModalInst, nurseTransferModalInst, assignAdmissionBedModalInst;
+
+    (async function init() {
+        const ctx = await MV.shell.mount({
+            roles: ['Admin', 'Nurse', 'Lab Technician', 'Pharmacist', 'Receptionist'],
+            title: 'Staff Portal',
+            subtitle: 'Appointments, care, nursing and clinical services'
+        });
+
+        userRole = ctx.user.role;
+        const roleTitles = {
+            'Pharmacist': 'Dispensing Queue',
+            'Receptionist': 'Reception Desk',
+            'Nurse': 'Nurse Station & Inpatient Care',
+            'Lab Technician': 'Laboratory Queue'
+        };
+        const titleEl = document.querySelector('.mv-page-title');
+        if (titleEl) titleEl.textContent = roleTitles[userRole] || 'Staff Portal';
+
+        // Role tabs
+        const tabs = document.createElement('div');
+        tabs.className = 'role-tabs';
+        tabs.innerHTML =
+            (userRole === 'Nurse' ? '<button class="role-tab active" data-view="nurse-patients"><i class="fa-solid fa-bed-pulse me-1"></i>Assigned Patients</button><button class="role-tab" data-view="nurse"><i class="fa-solid fa-bed me-1"></i>Ward Board</button><button class="role-tab" data-view="nurse-emg"><i class="fa-solid fa-truck-medical me-1"></i>Emergency Monitor</button>' : '') +
+            (userRole === 'Lab Technician' ? '<button class="role-tab active" data-view="lab-queue"><i class="fa-solid fa-flask me-1"></i>Test Queue</button><button class="role-tab" data-view="lab-completed"><i class="fa-solid fa-check-double me-1"></i>Completed</button>' : '') +
+            (userRole === 'Pharmacist' ? '<button class="role-tab active" data-view="pharma-queue"><i class="fa-solid fa-pills me-1"></i>Prescription Queue</button><button class="role-tab" data-view="pharma-inventory"><i class="fa-solid fa-boxes-stacked me-1"></i>Inventory</button>' : '') +
+            (userRole === 'Receptionist' ? '<button class="role-tab active" data-view="recept-billing" data-testid="reception-appointments-tab">Appointments & billing</button><button class="role-tab" data-view="recept-register">Register patient</button><button class="role-tab" data-view="recept-booking">Quick booking</button>' : '') +
+            (userRole === 'Admin' ? '<button class="role-tab active" data-view="nurse-patients"><i class="fa-solid fa-bed-pulse me-1"></i>Nurse Station</button><button class="role-tab" data-view="recept-register"><i class="fa-solid fa-user-plus me-1"></i>Register Patient</button><button class="role-tab" data-view="recept-booking"><i class="fa-solid fa-calendar-plus me-1"></i>Quick Booking</button><button class="role-tab" data-view="nurse"><i class="fa-solid fa-bed me-1"></i>Ward Board</button><button class="role-tab" data-view="lab-queue"><i class="fa-solid fa-flask me-1"></i>Lab Queue</button><button class="role-tab" data-view="pharma-queue"><i class="fa-solid fa-pills me-1"></i>Pharmacy Queue</button>' : '');
+
+        ctx.content.insertBefore(tabs, ctx.content.firstChild);
+
+        tabs.querySelectorAll('.role-tab').forEach(function (tab) {
+            tab.addEventListener('click', function () {
+                tabs.querySelectorAll('.role-tab').forEach(function (t) { t.classList.remove('active'); });
+                tab.classList.add('active');
+                activeView = tab.dataset.view;
+                renderView();
+            });
+        });
+
+        const viewContainer = document.createElement('div');
+        viewContainer.id = 'viewContainer';
+        ctx.content.appendChild(viewContainer);
+
+        createModals();
+        createNurseModalListeners();
+
+        // Initial view
+        if (userRole === 'Nurse') activeView = 'nurse-patients';
+        else if (userRole === 'Lab Technician') activeView = 'lab-queue';
+        else if (userRole === 'Pharmacist') activeView = 'pharma-queue';
+        else if (userRole === 'Receptionist') activeView = 'recept-billing';
+        else if (userRole === 'Admin') activeView = 'nurse-patients';
+
+        renderView();
+
+        setInterval(function () {
+            if (activeView === 'nurse-patients') renderNursePatients();
+            else if (activeView === 'nurse') loadBeds();
+            else if (activeView === 'lab-queue') loadPendingRequests();
+            else if (activeView === 'pharma-queue') loadPendingPrescriptions();
+        }, 30000);
+    })();
+
+    function createModals() {
+        // Lab result modal
+        const labModal = document.createElement('div');
+        labModal.innerHTML =
+            '<div class="modal fade" id="labResultModal" tabindex="-1">' +
+              '<div class="modal-dialog">' +
+                '<div class="modal-content">' +
+                  '<div class="modal-header">' +
+                    '<h5 class="modal-title">Enter Lab Result</h5>' +
+                    '<button type="button" class="btn-close" data-bs-dismiss="modal"></button>' +
+                  '</div>' +
+                  '<div class="modal-body">' +
+                    '<form id="labResultForm">' +
+                      '<input type="hidden" name="request_id" id="labRequestId">' +
+                      '<div class="mb-3">' +
+                        '<label class="form-label">Patient</label>' +
+                        '<input type="text" class="form-control" id="labPatientName" readonly>' +
+                      '</div>' +
+                      '<div class="mb-3">' +
+                        '<label class="form-label">Test</label>' +
+                        '<input type="text" class="form-control" id="labTestName" readonly>' +
+                      '</div>' +
+                      '<div class="mb-3">' +
+                        '<label class="form-label">Result Summary</label>' +
+                        '<textarea class="form-control" name="result_summary" rows="4" required placeholder="Enter test findings..."></textarea>' +
+                      '</div>' +
+                    '</form>' +
+                  '</div>' +
+                  '<div class="modal-footer">' +
+                    '<button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+                    '<button type="button" class="btn btn-primary" id="submitLabResult">Generate Report</button>' +
+                  '</div>' +
+                '</div>' +
+              '</div>' +
+            '</div>';
+        document.body.appendChild(labModal);
+
+        const labModalInst = new bootstrap.Modal(document.getElementById('labResultModal'));
+
+        document.getElementById('submitLabResult').addEventListener('click', async function () {
+            const form = document.getElementById('labResultForm');
+            if (!form.checkValidity()) return form.reportValidity();
+
+            const data = Object.fromEntries(new FormData(form));
+            const requestId = document.getElementById('labRequestId').value;
+
+            try {
+                await MV.api.post('/api/staff/lab-tech/requests/' + requestId + '/report', data);
+                MV.toast({ message: 'Report generated', type: 'success' });
+                labModalInst.hide();
+                form.reset();
+                loadPendingRequests();
+            } catch (err) {
+                MV.toast({ message: err.message, type: 'danger' });
+            }
+        });
+
+        window.labModalInst = labModalInst;
+
+        // Dispense prescription modal
+        const dispenseModal = document.createElement('div');
+        dispenseModal.innerHTML =
+            '<div class="modal fade" id="dispenseModal" tabindex="-1">' +
+              '<div class="modal-dialog modal-lg">' +
+                '<div class="modal-content">' +
+                  '<div class="modal-header">' +
+                    '<h5 class="modal-title">Confirm dispensing</h5>' +
+                    '<button type="button" class="btn-close" data-bs-dismiss="modal"></button>' +
+                  '</div>' +
+                  '<div class="modal-body">' +
+                    '<div id="dispenseInfo"></div>' +
+                    '<div id="dispenseItems" class="rx-preview"></div>' +
+                  '</div>' +
+                  '<div class="modal-footer">' +
+                    '<button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+                    '<button type="button" class="mv-btn mv-btn-primary" id="confirmDispense" data-testid="staff-confirm-dispense">Confirm dispense</button>' +
+                  '</div>' +
+                '</div>' +
+              '</div>' +
+            '</div>';
+        document.body.appendChild(dispenseModal);
+
+        const dispenseModalInst = new bootstrap.Modal(document.getElementById('dispenseModal'));
+
+        document.getElementById('confirmDispense').addEventListener('click', async function () {
+            const prescriptionId = window.activePrescriptionId;
+            if (!prescriptionId) return;
+            const restore = MV.pending(this, 'Dispensing…');
+            try {
+                await MV.api.post('/api/staff/pharmacist/dispense/' + prescriptionId);
+                MV.toast({ message: 'Prescription dispensed, stock updated', type: 'success' });
+                dispenseModalInst.hide();
+                await loadPendingPrescriptions();
+                renderPharmaQueue();
+            } catch (err) {
+                MV.toast({ message: err.message, type: 'danger' });
+            } finally {
+                restore();
+            }
+        });
+
+        window.dispenseModalInst = dispenseModalInst;
+    }
+
+    function createNurseModalListeners() {
+        nurseVitalsModalInst = new bootstrap.Modal(document.getElementById('nurseVitalsModal'));
+        nurseNotesModalInst = new bootstrap.Modal(document.getElementById('nurseNotesModal'));
+        nurseTransferModalInst = new bootstrap.Modal(document.getElementById('nurseTransferModal'));
+        assignAdmissionBedModalInst = new bootstrap.Modal(document.getElementById('assignAdmissionBedModal'));
+
+        // Submit Vitals
+        document.getElementById('submitNurseVitalsBtn').addEventListener('click', async function () {
+            const form = document.getElementById('nurseVitalsForm');
+            const data = Object.fromEntries(new FormData(form));
+            const restore = MV.pending(this, 'Saving...');
+            try {
+                await MV.api.post('/api/staff/nurse/vitals', data);
+                MV.toast({ message: 'Vitals saved successfully', type: 'success' });
+                nurseVitalsModalInst.hide();
+                renderNursePatients();
+            } catch (err) {
+                MV.toast({ message: err.message, type: 'danger' });
+            } finally {
+                restore();
+            }
+        });
+
+        // Submit Note
+        document.getElementById('submitNurseNotesBtn').addEventListener('click', async function () {
+            const form = document.getElementById('nurseNotesForm');
+            if (!form.checkValidity()) return form.reportValidity();
+            const data = Object.fromEntries(new FormData(form));
+            const restore = MV.pending(this, 'Saving...');
+            try {
+                await MV.api.post('/api/staff/nurse/notes', data);
+                MV.toast({ message: 'Care note recorded', type: 'success' });
+                nurseNotesModalInst.hide();
+                renderNursePatients();
+            } catch (err) {
+                MV.toast({ message: err.message, type: 'danger' });
+            } finally {
+                restore();
+            }
+        });
+
+        // Submit Transfer
+        document.getElementById('submitNurseTransferBtn').addEventListener('click', async function () {
+            const form = document.getElementById('nurseTransferForm');
+            if (!form.checkValidity()) return form.reportValidity();
+            const data = Object.fromEntries(new FormData(form));
+            const restore = MV.pending(this, 'Transferring...');
+            try {
+                const res = await MV.api.post('/api/staff/nurse/transfer-bed', data);
+                MV.toast({ message: res.message, type: 'success' });
+                nurseTransferModalInst.hide();
+                renderNursePatients();
+            } catch (err) {
+                MV.toast({ message: err.message, type: 'danger' });
+            } finally {
+                restore();
+            }
+        });
+
+        // Submit Inpatient Admission Bed Assignment
+        document.getElementById('confirmAssignAdmissionBedBtn').addEventListener('click', async function () {
+            const form = document.getElementById('assignAdmissionBedForm');
+            if (!form.checkValidity()) return form.reportValidity();
+            const data = Object.fromEntries(new FormData(form));
+            const restore = MV.pending(this, 'Assigning Bed...');
+            try {
+                const res = await MV.api.post('/api/staff/nurse/assign-admission-bed', data);
+                MV.toast({ message: res.message, type: 'success' });
+                assignAdmissionBedModalInst.hide();
+                renderNursePatients();
+            } catch (err) {
+                MV.toast({ message: err.message, type: 'danger' });
+            } finally {
+                restore();
+            }
+        });
+    }
+
+    async function renderView() {
+        const container = document.getElementById('viewContainer');
+        if (!container) return;
+
+        if (activeView === 'nurse-patients') {
+            await renderNursePatients();
+        } else if (activeView === 'nurse-emg') {
+            await renderNurseEmergencyMonitor();
+        } else if (activeView === 'nurse') {
+            await loadBeds();
+            container.innerHTML = '<h5 style="margin-bottom:1rem">Ward Bed Status</h5><div class="ward-board" id="wardBoard"></div>';
+            renderBeds();
+        } else if (activeView === 'lab-queue') {
+            await loadPendingRequests();
+            container.innerHTML = '<h5 style="margin-bottom:1rem">Pending Test Requests</h5><div id="labQueue"></div>';
+            renderLabQueue();
+        } else if (activeView === 'lab-completed') {
+            await loadCompletedReports();
+            container.innerHTML = '<h5 style="margin-bottom:1rem">Completed Reports</h5><div id="labCompleted"></div>';
+            renderLabCompleted();
+        } else if (activeView === 'pharma-queue') {
+            await loadPendingPrescriptions();
+            container.innerHTML = '<h5 style="margin-bottom:1rem">Pending Prescriptions</h5><div id="pharmaQueue"></div>';
+            renderPharmaQueue();
+        } else if (activeView === 'pharma-inventory') {
+            await loadInventory();
+            container.innerHTML =
+                '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem">' +
+                  '<h5 style="margin:0">Inventory</h5>' +
+                  '<input type="search" class="form-control" placeholder="Search medicines..." style="max-width:300px" id="inventorySearch">' +
+                '</div>' +
+                '<div id="inventoryTable"></div>';
+            renderInventory();
+            document.getElementById('inventorySearch').addEventListener('input', function (e) {
+                searchInventory(e.target.value);
+            });
+        } else if (activeView === 'recept-billing') {
+            MV.receptionBilling(container);
+        } else if (activeView === 'recept-register') {
+            container.innerHTML = renderRegisterForm();
+        } else if (activeView === 'recept-booking') {
+            container.innerHTML = renderQuickBookingForm();
+        }
+    }
+
+    // ========== NURSE: ASSIGNED PATIENTS & ADMISSION REQUESTS ==========
+    async function renderNursePatients() {
+        const container = document.getElementById('viewContainer');
+        if (!container) return;
+
+        try {
+            const [patients, admRequests] = await Promise.all([
+                MV.api.get('/api/staff/nurse/assigned-patients'),
+                MV.api.get('/api/staff/nurse/admission-requests')
+            ]);
+
+            if ((!patients || !patients.length) && (!admRequests || !admRequests.length)) {
+                container.innerHTML = MV.emptyState({
+                    icon: 'bed-pulse',
+                    title: 'No Inpatients or Admission Requests',
+                    text: 'When doctors recommend admission or patients are assigned beds in General Ward, ICU, or Emergency, they will appear here.'
+                });
+                MV.icons(container);
+                return;
+            }
+
+            let html = '';
+
+            // Section 1: Pending Doctor Admission Requests (Bed Assignment Needed)
+            if (admRequests && admRequests.length) {
+                html +=
+                    '<div class="mv-card mb-4" style="border:1px solid var(--mv-border);border-top:3px solid var(--mv-warning)">' +
+                      '<div class="mv-card-head d-flex justify-content-between align-items-center">' +
+                        '<div>' +
+                          '<h3 class="m-0"><i class="fas fa-bed text-warning me-2"></i>Doctor Inpatient Admission Requests</h3>' +
+                          '<small class="text-muted">Physicians have recommended inpatient hospitalization. Assign available beds to admit patients.</small>' +
+                        '</div>' +
+                        '<span class="badge bg-warning text-dark fw-bold px-3 py-2 fs-6">' + admRequests.length + ' Pending Assignment</span>' +
+                      '</div>' +
+                      '<div class="table-responsive">' +
+                        '<table class="table table-hover align-middle m-0">' +
+                          '<thead><tr>' +
+                            '<th>Patient Details</th>' +
+                            '<th>Recommended Ward</th>' +
+                            '<th>Priority</th>' +
+                            '<th>Recommending Doctor</th>' +
+                            '<th>Clinical Reason</th>' +
+                            '<th>Requested At</th>' +
+                            '<th class="text-end">Action</th>' +
+                          '</tr></thead>' +
+                          '<tbody>' +
+                          admRequests.map(function (ar) {
+                              const prioBadge = ar.priority === 'Critical' 
+                                  ? '<span class="badge bg-danger">Critical</span>' 
+                                  : (ar.priority === 'Urgent' 
+                                      ? '<span class="badge bg-warning text-dark">Urgent</span>' 
+                                      : '<span class="badge bg-info text-dark">Standard</span>');
+                              return '<tr>' +
+                                  '<td>' +
+                                    '<strong>' + MV.esc(ar.patient_name) + '</strong> (' + ar.gender + ', ' + ar.age + 'y)<br>' +
+                                    '<small class="text-muted">' + MV.esc(ar.patient_phone || '--') + ' &bull; Blood: ' + MV.esc(ar.blood_group || '--') + '</small>' +
+                                  '</td>' +
+                                  '<td><span class="badge bg-secondary-subtle text-light border px-2 py-1"><i class="fas fa-hospital me-1"></i>' + MV.esc(ar.recommended_ward) + '</span></td>' +
+                                  '<td>' + prioBadge + '</td>' +
+                                  '<td>' +
+                                    '<strong>' + MV.esc(MV.fmt.docName(ar.doctor_name)) + '</strong><br>' +
+                                    '<small class="text-muted">' + MV.esc(ar.specialization || '') + '</small>' +
+                                  '</td>' +
+                                  '<td><small class="text-muted d-inline-block text-truncate" style="max-width:220px" title="' + MV.esc(ar.reason || '') + '">' + MV.esc(ar.reason || 'Hospitalization recommended') + '</small></td>' +
+                                  '<td><small class="text-muted">' + MV.fmt.date(ar.created_at) + '</small></td>' +
+                                  '<td class="text-end text-nowrap">' +
+                                    '<button type="button" class="mv-btn mv-btn-primary mv-btn-sm" onclick="window.openAssignAdmissionBedModal(' + ar.request_id + ', \'' + MV.esc(ar.patient_name) + '\', \'' + MV.esc(ar.recommended_ward) + '\', ' + ar.patient_id + ', \'' + MV.esc(ar.reason || '') + '\')">' +
+                                      '<i class="fas fa-bed me-1"></i> Assign Bed' +
+                                    '</button>' +
+                                  '</td>' +
+                                '</tr>';
+                          }).join('') +
+                          '</tbody>' +
+                        '</table>' +
+                      '</div>' +
+                    '</div>';
+            }
+
+            // Section 2: Inpatient Monitoring Roster
+            if (patients && patients.length) {
+                html +=
+                    '<div class="mv-card">' +
+                  '<div class="mv-card-head d-flex justify-content-between align-items-center">' +
+                    '<div><h3 class="m-0">Inpatient Monitoring Roster</h3><small class="text-muted">Ward-wise vitals, clinical care notes, and attending consultants</small></div>' +
+                    '<span class="badge bg-secondary">' + patients.length + ' Patient(s)</span>' +
+                  '</div>' +
+                  '<div class="table-responsive">' +
+                    '<table class="table table-hover align-middle m-0">' +
+                      '<thead><tr>' +
+                        '<th>Ward & Bed</th>' +
+                        '<th>Patient Profile</th>' +
+                        '<th>Attending Doctor</th>' +
+                        '<th>Latest Vitals</th>' +
+                        '<th>Latest Nursing Note</th>' +
+                        '<th class="text-end">Actions</th>' +
+                      '</tr></thead>' +
+                      '<tbody>';
+
+            patients.forEach(function (p) {
+                const bpText = p.last_bp_systolic ? (p.last_bp_systolic + '/' + p.last_bp_diastolic) : '--';
+                const hrText = p.last_heart_rate ? (p.last_heart_rate + ' bpm') : '--';
+                const spo2Text = p.last_spo2 ? (p.last_spo2 + '%') : '--';
+                const tempText = p.last_temperature ? (p.last_temperature + '°F') : '--';
+
+                const vitalsSummary =
+                    '<div class="d-flex flex-wrap gap-1">' +
+                      '<span class="vitals-pill" title="Blood Pressure"><i class="fas fa-heart text-danger"></i> ' + bpText + '</span>' +
+                      '<span class="vitals-pill" title="Heart Rate"><i class="fas fa-heart-pulse text-warning"></i> ' + hrText + '</span>' +
+                      '<span class="vitals-pill" title="SpO2"><i class="fas fa-lungs text-primary"></i> ' + spo2Text + '</span>' +
+                      '<span class="vitals-pill" title="Temperature"><i class="fas fa-thermometer text-info"></i> ' + tempText + '</span>' +
+                    '</div>';
+
+                html += '<tr>' +
+                    '<td><strong>' + MV.esc(p.ward_name) + '</strong><br><span class="badge bg-primary fs-6">' + MV.esc(p.bed_number) + '</span></td>' +
+                    '<td>' +
+                      '<strong>' + MV.esc(p.patient_name) + '</strong> (' + p.gender + ', ' + p.age + 'y)<br>' +
+                      '<small class="text-muted">Blood: ' + MV.esc(p.blood_group || '--') + ' &bull; Allergies: ' + MV.esc(p.allergies || 'None') + '</small>' +
+                    '</td>' +
+                    '<td><i class="fas fa-user-doctor me-1 text-muted"></i>' + MV.esc(p.attending_doctor_name) + '</td>' +
+                    '<td>' + vitalsSummary + '</td>' +
+                    '<td>' + (p.latest_note ? '<small class="text-muted d-inline-block text-truncate" style="max-width:200px">' + MV.esc(p.latest_note) + '</small>' : '<small class="text-muted">No notes</small>') + '</td>' +
+                    '<td class="text-end text-nowrap">' +
+                      '<button type="button" class="mv-btn mv-btn-sm mv-btn-outline me-1" onclick="window.openNurseVitals(' + p.patient_id + ', \'' + MV.esc(p.patient_name) + '\')">' +
+                        '<i class="fas fa-heart-pulse text-danger"></i> Vitals' +
+                      '</button>' +
+                      '<button type="button" class="mv-btn mv-btn-sm mv-btn-outline me-1" onclick="window.openNurseNotes(' + p.patient_id + ', \'' + MV.esc(p.patient_name) + '\')">' +
+                        '<i class="fas fa-note-sticky"></i> Note' +
+                      '</button>' +
+                      '<button type="button" class="mv-btn mv-btn-sm mv-btn-outline" onclick="window.openNurseTransfer(' + p.patient_id + ', \'' + MV.esc(p.patient_name) + '\', ' + p.bed_id + ', \'' + MV.esc(p.ward_name + ' ' + p.bed_number) + '\')">' +
+                        '<i class="fas fa-right-left"></i>' +
+                      '</button>' +
+                    '</td>' +
+                  '</tr>';
+            });
+
+            if (patients && patients.length) {
+                html += '</tbody></table></div></div>';
+            } else {
+                html += '<div class="alert alert-secondary py-3 text-center" style="font-size:13px"><i class="fas fa-info-circle me-1"></i>No inpatients currently admitted. Process pending admission requests above to assign beds.</div>';
+            }
+            container.innerHTML = html;
+        } catch (err) {
+            container.innerHTML = MV.emptyState({ icon: 'alert-circle', title: 'Could not load assigned patients', text: err.message });
+        }
+    }
+
+    // ========== NURSE: EMERGENCY MONITOR ==========
+    async function renderNurseEmergencyMonitor() {
+        const container = document.getElementById('viewContainer');
+        if (!container) return;
+
+        try {
+            const list = await MV.api.get('/api/staff/nurse/emergency-monitor');
+            if (!list.length) {
+                container.innerHTML = MV.emptyState({
+                    icon: 'truck-medical',
+                    title: 'No Active Emergency Patients',
+                    text: 'Emergency queue is clear.'
+                });
+                MV.icons(container);
+                return;
+            }
+
+            let html =
+                '<div class="mv-card">' +
+                  '<div class="mv-card-head">' +
+                    '<h3 class="m-0"><i class="fas fa-truck-medical text-danger me-2"></i>Live Emergency Acuity Monitor</h3>' +
+                    '<small class="text-muted">High priority patients and arrival wait timers</small>' +
+                  '</div>' +
+                  '<div class="table-responsive">' +
+                    '<table class="table table-hover align-middle m-0">' +
+                      '<thead><tr>' +
+                        '<th>ID</th>' +
+                        '<th>Patient</th>' +
+                        '<th>Priority</th>' +
+                        '<th>Chief Complaint</th>' +
+                        '<th>Assigned Doctor & Bed</th>' +
+                        '<th>Latest Vitals</th>' +
+                        '<th>Wait</th>' +
+                      '</tr></thead>' +
+                      '<tbody>';
+
+            list.forEach(function (e) {
+                const pClass = (e.triage_priority || 'P3').toLowerCase();
+                html += '<tr>' +
+                    '<td><span class="fw-bold text-primary">' + MV.esc(e.emg_number) + '</span></td>' +
+                    '<td><strong>' + MV.esc(e.patient_name) + '</strong></td>' +
+                    '<td><span class="p-badge ' + pClass + '">' + (e.triage_priority || 'P3') + '</span></td>' +
+                    '<td><small class="text-muted">' + MV.esc(e.initial_complaint) + '</small></td>' +
+                    '<td>' +
+                      '<div><i class="fas fa-user-doctor me-1 text-muted"></i>' + (e.doctor_name ? MV.esc(e.doctor_name) : 'Unassigned') + '</div>' +
+                      '<div><i class="fas fa-bed me-1 text-muted"></i>' + (e.bed_number ? MV.esc(e.ward_name + ' ' + e.bed_number) : 'No Bed') + '</div>' +
+                    '</td>' +
+                    '<td><small>SpO2: ' + (e.latest_spo2 ? e.latest_spo2 + '%' : '--') + ' &bull; HR: ' + (e.latest_heart_rate || '--') + ' &bull; BP: ' + (e.latest_bp || '--') + '</small></td>' +
+                    '<td><span class="fw-bold ' + (e.wait_minutes > 30 ? 'text-danger' : 'text-muted') + '">' + e.wait_minutes + 'm</span></td>' +
+                  '</tr>';
+            });
+
+            html += '</tbody></table></div></div>';
+            container.innerHTML = html;
+        } catch (err) {
+            container.innerHTML = MV.emptyState({ icon: 'alert-circle', title: 'Could not load monitor', text: err.message });
+        }
+    }
+
+    // Nurse window actions
+    window.openNurseVitals = function (patientId, patientName) {
+        document.getElementById('nvPatientId').value = patientId;
+        document.getElementById('nvPatientName').value = patientName;
+        document.getElementById('nurseVitalsForm').reset();
+        document.getElementById('nvPatientId').value = patientId;
+        document.getElementById('nvPatientName').value = patientName;
+        nurseVitalsModalInst.show();
+    };
+
+    window.openNurseNotes = function (patientId, patientName) {
+        document.getElementById('nnPatientId').value = patientId;
+        document.getElementById('nnPatientName').value = patientName;
+        document.getElementById('nurseNotesForm').reset();
+        document.getElementById('nnPatientId').value = patientId;
+        document.getElementById('nnPatientName').value = patientName;
+        nurseNotesModalInst.show();
+    };
+
+    window.openNurseTransfer = async function (patientId, patientName, currentBedId, currentBedName) {
+        document.getElementById('ntPatientId').value = patientId;
+        document.getElementById('ntPatientName').value = patientName;
+        document.getElementById('ntCurrentBedId').value = currentBedId;
+        document.getElementById('ntCurrentBedName').value = currentBedName;
+
+        const sel = document.getElementById('ntTargetBedSelect');
+        sel.innerHTML = '<option value="">Loading beds...</option>';
+
+        try {
+            const allBeds = await MV.api.get('/api/admin/beds');
+            sel.innerHTML = '<option value="">Choose available bed...</option>';
+            allBeds.filter(function (b) { return b.status === 'Available'; }).forEach(function (b) {
+                const opt = document.createElement('option');
+                opt.value = b.bed_id;
+                opt.textContent = b.ward_name + ' — ' + b.bed_number;
+                sel.appendChild(opt);
+            });
+        } catch (_) {
+            sel.innerHTML = '<option value="">Could not load beds</option>';
+        }
+
+        nurseTransferModalInst.show();
+    };
+
+    window.openAssignAdmissionBedModal = async function (requestId, patientName, recommendedWard, patientId, reason) {
+        document.getElementById('aabRequestId').value = requestId;
+        document.getElementById('aabPatientId').value = patientId;
+        document.getElementById('aabPatientName').value = patientName;
+        document.getElementById('aabRecommendedWard').value = recommendedWard;
+        document.getElementById('aabReason').textContent = reason || 'Inpatient admission recommended by physician.';
+
+        const sel = document.getElementById('aabBedSelect');
+        sel.innerHTML = '<option value="">Loading available beds...</option>';
+        assignAdmissionBedModalInst.show();
+
+        try {
+            const beds = await MV.api.get('/api/staff/nurse/available-beds?ward=' + encodeURIComponent(recommendedWard));
+            let bedList = beds;
+            if (!bedList || !bedList.length) {
+                // Fallback: fetch all available beds if recommended ward has no empty beds
+                bedList = await MV.api.get('/api/staff/nurse/available-beds');
+            }
+            if (!bedList || !bedList.length) {
+                sel.innerHTML = '<option value="">No beds currently available in hospital</option>';
+                return;
+            }
+            sel.innerHTML = '<option value="">Choose bed...</option>' +
+                bedList.map(function (b) {
+                    return '<option value="' + b.bed_id + '">' + MV.esc(b.ward_name) + ' — Bed ' + MV.esc(b.bed_number) + '</option>';
+                }).join('');
+        } catch (err) {
+            sel.innerHTML = '<option value="">Failed to load beds</option>';
+        }
+    };
+
+    // ========== WARD BEDS ==========
+    async function loadBeds() {
+        try {
+            beds = await MV.api.get('/api/staff/nurse/beds');
+        } catch (err) {
+            MV.toast({ message: 'Failed to load beds', type: 'danger' });
+        }
+    }
+
+    function renderBeds() {
+        const board = document.getElementById('wardBoard');
+        if (!board) return;
+
+        if (!beds.length) {
+            board.innerHTML = MV.emptyState({ icon: 'bed', title: 'No beds', text: 'Ward data unavailable' });
+            MV.icons(board);
+            return;
+        }
+
+        let html = '';
+        beds.forEach(function (bed) {
+            const statusClass = bed.status === 'Available' ? 'available' : 'occupied';
+            html += '<div class="bed-tile ' + statusClass + '" onclick="viewBed(\'' + bed.bed_number + '\')">'
+                + '<div class="bed-number">' + bed.bed_number + '</div>'
+                + '<small class="text-muted">' + MV.esc(bed.ward_name) + '</small>'
+                + '<div class="bed-status">' + bed.status + '</div>'
+              + '</div>';
+        });
+
+        board.innerHTML = html;
+    }
+
+    window.viewBed = function (bedNumber) {
+        const bed = beds.find(function (b) { return b.bed_number === bedNumber; });
+        if (!bed) return;
+        MV.toast({ message: bed.status === 'Available' ? 'Bed available' : 'Occupied by ' + (bed.patient_name || 'patient'), type: 'info' });
+    };
+
+    // ========== LAB TECH ==========
+    async function loadPendingRequests() {
+        try {
+            pendingRequests = await MV.api.get('/api/staff/lab-tech/pending-requests');
+        } catch (err) {
+            MV.toast({ message: 'Failed to load requests', type: 'danger' });
+        }
+    }
+
+    function renderLabQueue() {
+        const queue = document.getElementById('labQueue');
+        if (!queue) return;
+
+        if (!pendingRequests.length) {
+            queue.innerHTML = MV.emptyState({ icon: 'flask', title: 'No pending requests', text: 'Queue is clear' });
+            MV.icons(queue);
+            return;
+        }
+
+        let html = '';
+        pendingRequests.forEach(function (req) {
+            html += '<div class="queue-card" onclick="openLabResult(' + req.request_id + ', \'' + MV.esc(req.patient_name) + '\', \'' + MV.esc(req.test_name) + '\')">'
+                + '<h6>' + MV.esc(req.test_name) + '</h6>'
+                + '<p><strong>Patient:</strong> ' + MV.esc(req.patient_name) + '</p>'
+                + '<p><strong>Requested by:</strong> ' + MV.esc(req.requested_by) + '</p>'
+              + '</div>';
+        });
+
+        queue.innerHTML = html;
+    }
+
+    window.openLabResult = function (requestId, patientName, testName) {
+        document.getElementById('labResultForm').reset();
+        document.getElementById('labRequestId').value = requestId;
+        document.getElementById('labPatientName').value = patientName;
+        document.getElementById('labTestName').value = testName;
+        window.labModalInst.show();
+    };
+
+    async function loadCompletedReports() {
+        try {
+            completedReports = await MV.api.get('/api/staff/lab-tech/completed-reports');
+        } catch (err) {
+            MV.toast({ message: 'Failed to load reports', type: 'danger' });
+        }
+    }
+
+    function renderLabCompleted() {
+        const completed = document.getElementById('labCompleted');
+        if (!completed) return;
+
+        if (!completedReports.length) {
+            completed.innerHTML = MV.emptyState({ icon: 'file-check', title: 'No completed reports', text: '' });
+            MV.icons(completed);
+            return;
+        }
+
+        let html = '';
+        completedReports.forEach(function (rep) {
+            html += '<div class="queue-card">'
+                + '<h6>' + MV.esc(rep.test_name) + '</h6>'
+                + '<p><strong>Patient:</strong> ' + MV.esc(rep.patient_name) + '</p>'
+                + '<p><strong>Date:</strong> ' + new Date(rep.report_date).toLocaleString() + '</p>'
+              + '</div>';
+        });
+
+        completed.innerHTML = html;
+    }
+
+    // ========== PHARMACIST ==========
+    async function loadPendingPrescriptions() {
+        try {
+            pendingPrescriptions = await MV.api.get('/api/staff/pharmacist/pending-prescriptions');
+        } catch (err) {
+            MV.toast({ message: 'Failed to load prescriptions', type: 'danger' });
+        }
+    }
+
+    function renderPharmaQueue() {
+        const queue = document.getElementById('pharmaQueue');
+        if (!queue) return;
+
+        if (!pendingPrescriptions.length) {
+            queue.innerHTML = MV.emptyState({ icon: 'pill', title: 'No pending prescriptions', text: 'Queue is clear' });
+            MV.icons(queue);
+            return;
+        }
+
+        let html = '';
+        pendingPrescriptions.forEach(function (rx) {
+            html += '<div class="queue-card" onclick="openDispense(' + rx.prescription_id + ')">'
+                + '<h6>Prescription #' + rx.prescription_id + '</h6>'
+                + '<p><strong>Patient:</strong> ' + MV.esc(rx.patient_name) + '</p>'
+                + '<p><strong>Doctor:</strong> ' + MV.esc(rx.doctor_name) + '</p>'
+                + '<p><strong>Date:</strong> ' + new Date(rx.prescribed_date).toLocaleDateString() + '</p>'
+              + '</div>';
+        });
+
+        queue.innerHTML = html;
+    }
+
+    window.openDispense = async function (prescriptionId) {
+        window.activePrescriptionId = prescriptionId;
+        try {
+            const items = await MV.api.get('/api/staff/pharmacist/prescription-items/' + prescriptionId);
+            const rx = pendingPrescriptions.find(function (r) { return r.prescription_id === prescriptionId; });
+
+            document.getElementById('dispenseInfo').innerHTML = '';
+            const preview = MV.dispenseRecord(rx, items);
+            document.getElementById('dispenseItems').innerHTML = preview.html;
+            document.getElementById('confirmDispense').disabled = !preview.canDispense;
+            window.dispenseModalInst.show();
+        } catch (err) {
+            MV.toast({ message: 'Failed to load prescription items', type: 'danger' });
+        }
+    };
+
+    async function loadInventory() {
+        try {
+            inventory = await MV.api.get('/api/staff/pharmacist/inventory');
+        } catch (err) {
+            MV.toast({ message: 'Failed to load inventory', type: 'danger' });
+        }
+    }
+
+    function renderInventory() {
+        const table = document.getElementById('inventoryTable');
+        if (!table) return;
+
+        if (!inventory.length) {
+            table.innerHTML = MV.emptyState({ icon: 'package', title: 'No medicines', text: '' });
+            MV.icons(table);
+            return;
+        }
+
+        table.innerHTML = MV.table({
+            columns: ['Medicine', 'Manufacturer', 'Price', 'Stock', 'Expiry'],
+            rows: inventory.map(function (med) {
+                const stockBadge = med.stock_qty < 20 ? '<span class="mv-badge mv-badge-danger">Low</span>' : med.stock_qty;
+                const expiry = new Date(med.expiry_date);
+                const now = new Date();
+                const daysDiff = Math.floor((expiry - now) / (1000 * 60 * 60 * 24));
+                const expiryBadge = daysDiff < 30 ? '<span class="mv-badge mv-badge-warning">Expiring</span>' : expiry.toLocaleDateString();
+
+                return [
+                    MV.esc(med.medicine_name),
+                    MV.esc(med.manufacturer),
+                    MV.fmt.money(med.unit_price),
+                    stockBadge,
+                    expiryBadge
+                ];
+            })
+        });
+    }
+
+    async function searchInventory(query) {
+        try {
+            inventory = await MV.api.get('/api/staff/pharmacist/inventory?q=' + encodeURIComponent(query));
+            renderInventory();
+        } catch (err) {
+            MV.toast({ message: 'Search failed', type: 'danger' });
+        }
+    }
+
+    // ========== RECEPTIONIST ==========
+    function renderRegisterForm() {
+        return '<div class="mv-card" style="max-width:760px">' +
+            '<div class="mv-card-head">' +
+              '<div class="d-flex align-items-center gap-2">' +
+                '<i class="fa-solid fa-user-plus text-primary fs-5"></i>' +
+                '<h2 style="margin:0;font-size:16px;font-weight:600">Register New Patient</h2>' +
+              '</div>' +
+              '<span class="mv-badge is-primary"><i class="fa-solid fa-id-card me-1"></i>Patient Registration</span>' +
+            '</div>' +
+            '<div class="mv-card-body">' +
+              '<form id="registerForm">' +
+                '<div class="row g-3">' +
+                  '<div class="col-md-6">' +
+                    '<label class="form-label">Full Name <span class="text-danger">*</span></label>' +
+                    '<input type="text" class="form-control" name="name" placeholder="John Doe" required>' +
+                  '</div>' +
+                  '<div class="col-md-6">' +
+                    '<label class="form-label">Email Address <span class="text-danger">*</span></label>' +
+                    '<input type="email" class="form-control" name="email" placeholder="john.doe@example.com" required>' +
+                  '</div>' +
+                  '<div class="col-md-6">' +
+                    '<label class="form-label">Phone Number <span class="text-danger">*</span></label>' +
+                    '<input type="tel" class="form-control" name="phone" placeholder="+1 (555) 000-0000" required>' +
+                  '</div>' +
+                  '<div class="col-md-6">' +
+                    '<label class="form-label">Date of Birth <span class="text-danger">*</span></label>' +
+                    '<input type="date" class="form-control" name="dob" required>' +
+                  '</div>' +
+                  '<div class="col-md-6">' +
+                    '<label class="form-label">Gender <span class="text-danger">*</span></label>' +
+                    '<select class="form-select" name="gender" required>' +
+                      '<option value="">Select Gender</option>' +
+                      '<option value="M">Male</option>' +
+                      '<option value="F">Female</option>' +
+                      '<option value="O">Other</option>' +
+                    '</select>' +
+                  '</div>' +
+                  '<div class="col-md-6">' +
+                    '<label class="form-label">Blood Group <span class="text-danger">*</span></label>' +
+                    '<select class="form-select" name="blood_group" required>' +
+                      '<option value="">Select Blood Group</option>' +
+                      '<option value="A+">A+</option>' +
+                      '<option value="A-">A-</option>' +
+                      '<option value="B+">B+</option>' +
+                      '<option value="B-">B-</option>' +
+                      '<option value="AB+">AB+</option>' +
+                      '<option value="AB-">AB-</option>' +
+                      '<option value="O+">O+</option>' +
+                      '<option value="O-">O-</option>' +
+                    '</select>' +
+                  '</div>' +
+                  '<div class="col-md-6">' +
+                    '<label class="form-label">Account Password <span class="text-danger">*</span></label>' +
+                    '<input type="password" class="form-control" name="password_hash" placeholder="••••••••" required>' +
+                  '</div>' +
+                  '<div class="col-md-6">' +
+                    '<label class="form-label">Emergency Contact Phone <span class="text-danger">*</span></label>' +
+                    '<input type="tel" class="form-control" name="emergency_contact" placeholder="+1 (555) 000-0000" required>' +
+                  '</div>' +
+                  '<div class="col-12">' +
+                    '<label class="form-label">Residential Address <span class="text-danger">*</span></label>' +
+                    '<textarea class="form-control" name="address" rows="2" placeholder="Street address, city, state, zip..." required></textarea>' +
+                  '</div>' +
+                  '<div class="col-12 pt-2">' +
+                    '<button type="submit" class="mv-btn mv-btn-primary w-100 justify-content-center py-2">' +
+                      '<i class="fa-solid fa-user-check me-1"></i> Register Patient' +
+                    '</button>' +
+                  '</div>' +
+                '</div>' +
+              '</form>' +
+            '</div>' +
+          '</div>';
+    }
+
+    function renderQuickBookingForm() {
+        return '<div class="mv-card" style="max-width:760px">' +
+            '<div class="mv-card-head">' +
+              '<div class="d-flex align-items-center gap-2">' +
+                '<i class="fa-solid fa-calendar-plus text-primary fs-5"></i>' +
+                '<h2 style="margin:0;font-size:16px;font-weight:600">Quick Appointment Booking</h2>' +
+              '</div>' +
+              '<span class="mv-badge is-primary"><i class="fa-solid fa-bolt me-1"></i>Fast Track</span>' +
+            '</div>' +
+            '<div class="mv-card-body">' +
+              '<form id="bookingForm">' +
+                '<div class="row g-3">' +
+                  '<div class="col-12">' +
+                    '<label class="form-label">Patient ID <span class="text-danger">*</span></label>' +
+                    '<input type="number" class="form-control" name="patient_id" placeholder="Enter patient ID number" required>' +
+                  '</div>' +
+                  '<div class="col-md-6">' +
+                    '<label class="form-label">Department ID <span class="text-danger">*</span></label>' +
+                    '<input type="number" class="form-control" name="department_id" placeholder="e.g. 1" required>' +
+                  '</div>' +
+                  '<div class="col-md-6">' +
+                    '<label class="form-label">Doctor ID <span class="text-danger">*</span></label>' +
+                    '<input type="number" class="form-control" name="doctor_id" placeholder="e.g. 1" required>' +
+                  '</div>' +
+                  '<div class="col-md-6">' +
+                    '<label class="form-label">Appointment Date <span class="text-danger">*</span></label>' +
+                    '<input type="date" class="form-control" name="appointment_date" required>' +
+                  '</div>' +
+                  '<div class="col-md-6">' +
+                    '<label class="form-label">Appointment Time <span class="text-danger">*</span></label>' +
+                    '<input type="time" class="form-control" name="appointment_time" required>' +
+                  '</div>' +
+                  '<div class="col-12 pt-2">' +
+                    '<button type="submit" class="mv-btn mv-btn-primary w-100 justify-content-center py-2">' +
+                      '<i class="fa-solid fa-calendar-check me-1"></i> Book Appointment' +
+                    '</button>' +
+                  '</div>' +
+                '</div>' +
+              '</form>' +
+            '</div>' +
+          '</div>';
+    }
+
+    // Form handlers
+    document.addEventListener('submit', async function (e) {
+        if (e.target.id === 'registerForm') {
+            e.preventDefault();
+            const data = Object.fromEntries(new FormData(e.target));
+            try {
+                await MV.api.post('/api/staff/receptionist/register-patient', data);
+                MV.toast({ message: 'Patient registered', type: 'success' });
+                e.target.reset();
+            } catch (err) {
+                MV.toast({ message: err.message, type: 'danger' });
+            }
+        } else if (e.target.id === 'bookingForm') {
+            e.preventDefault();
+            const data = Object.fromEntries(new FormData(e.target));
+            try {
+                await MV.api.post('/api/staff/receptionist/book-appointment', data);
+                MV.toast({ message: 'Appointment booked', type: 'success' });
+                e.target.reset();
+            } catch (err) {
+                MV.toast({ message: err.message, type: 'danger' });
+            }
+        }
+    });
+})();
+</script>
+</body>
+</html>

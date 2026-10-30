@@ -1,0 +1,1317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Emergency Ward — MediCare</title>
+
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link href="/assets/css/medivault-restyle.css" rel="stylesheet">
+<style>
+/* Emergency Module Styling strictly matching MediCare visual identity */
+.emg-stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+.emg-stat-card {
+    background: var(--mv-surface-0);
+    border: 1px solid var(--mv-border);
+    border-radius: var(--mv-radius-lg);
+    padding: 1.125rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    box-shadow: var(--mv-shadow-xs);
+}
+.emg-stat-info .stat-label {
+    font-size: .8125rem;
+    color: var(--mv-text-muted);
+    font-weight: 500;
+    margin-bottom: .25rem;
+}
+.emg-stat-info .stat-val {
+    font-size: 1.625rem;
+    font-weight: 700;
+    line-height: 1.1;
+    color: var(--mv-text);
+}
+.emg-stat-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: var(--mv-radius-pill);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.125rem;
+}
+.emg-stat-icon.danger { background: rgba(220, 38, 38, .12); color: #ef4444; }
+.emg-stat-icon.warning { background: rgba(234, 88, 12, .12); color: #f97316; }
+.emg-stat-icon.primary { background: rgba(37, 99, 235, .12); color: #3b82f6; }
+.emg-stat-icon.success { background: rgba(22, 163, 74, .12); color: #22c55e; }
+.emg-stat-icon.purple { background: rgba(147, 51, 234, .12); color: #a855f7; }
+
+/* Role & Module Tabs */
+.role-tabs {
+    display: flex;
+    gap: .5rem;
+    margin-bottom: 1.5rem;
+    border-bottom: 2px solid var(--mv-border);
+    flex-wrap: wrap;
+}
+.role-tab {
+    padding: .625rem 1.25rem;
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    font-weight: 600;
+    font-size: 13.5px;
+    color: var(--mv-text-muted);
+    cursor: pointer;
+    transition: all .2s ease;
+    margin-bottom: -2px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border-radius: var(--mv-radius-sm) var(--mv-radius-sm) 0 0;
+}
+.role-tab:hover { color: var(--mv-primary); background: var(--mv-surface-1); }
+.role-tab.active { color: var(--mv-primary); border-bottom-color: var(--mv-primary); background: var(--mv-surface); }
+
+/* Priority Badges */
+.p-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: .375rem;
+    padding: .25rem .625rem;
+    border-radius: var(--mv-radius-pill);
+    font-size: .75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .025em;
+}
+.p-badge.p1 { background: rgba(220, 38, 38, .15); color: #ef4444; border: 1px solid rgba(220, 38, 38, .3); }
+.p-badge.p2 { background: rgba(234, 88, 12, .15); color: #f97316; border: 1px solid rgba(234, 88, 12, .3); }
+.p-badge.p3 { background: rgba(37, 99, 235, .15); color: #3b82f6; border: 1px solid rgba(37, 99, 235, .3); }
+.p-badge.p4 { background: rgba(107, 114, 128, .15); color: #9ca3af; border: 1px solid rgba(107, 114, 128, .3); }
+
+/* Priority Engine Recommendation Card */
+.engine-rec-box {
+    background: var(--mv-surface-1);
+    border: 1px solid var(--mv-border);
+    border-radius: var(--mv-radius-lg);
+    padding: 1.25rem;
+    margin-bottom: 1rem;
+}
+.engine-rec-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    padding: .75rem 0;
+    border-bottom: 1px solid var(--mv-border);
+}
+.engine-rec-item:last-child { border-bottom: none; }
+.engine-rec-label {
+    font-size: .8125rem;
+    color: var(--mv-text-muted);
+    font-weight: 600;
+}
+.engine-rec-val {
+    font-size: .9375rem;
+    font-weight: 600;
+    text-align: right;
+    max-width: 65%;
+}
+.engine-reason {
+    font-size: .8125rem;
+    color: var(--mv-text-muted);
+    margin-top: .25rem;
+    font-weight: normal;
+}
+
+/* Bed Matrix inside Emergency Ward */
+.bed-matrix {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    gap: .75rem;
+}
+.bed-box {
+    padding: .875rem;
+    border-radius: var(--mv-radius);
+    border: 1px solid var(--mv-border);
+    background: var(--mv-surface-1);
+    display: flex;
+    flex-direction: column;
+    gap: .375rem;
+    cursor: pointer;
+    transition: transform .15s, border-color .15s;
+}
+.bed-box:hover {
+    transform: translateY(-2px);
+    border-color: var(--mv-primary);
+}
+.bed-box.avail { border-left: 4px solid var(--mv-success); }
+.bed-box.occup { border-left: 4px solid var(--mv-danger); }
+.bed-box.clean { border-left: 4px solid var(--mv-warning); }
+.bed-box-no { font-weight: 700; font-size: 1rem; }
+.bed-box-pat { font-size: .75rem; color: var(--mv-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Table overrides */
+.table-emg th {
+    font-size: .8125rem;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    color: var(--mv-text-muted);
+    padding: .75rem .875rem;
+}
+.table-emg td {
+    padding: .875rem;
+    vertical-align: middle;
+    font-size: .875rem;
+}
+</style>
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<script src="/assets/js/theme-init.js"></script>
+<script src="/runtime-config.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+
+<div class="mv-layout" id="mvShell"></div>
+
+<!-- =========================================================================
+     MODALS
+========================================================================== -->
+
+<!-- 1. Triage Assessment Modal -->
+<div class="modal fade" id="triageModal" tabindex="-1" aria-labelledby="triageModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="triageModalLabel"><i class="fas fa-stethoscope me-2 text-danger"></i>Clinical Triage Assessment</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <form id="triageForm">
+                    <input type="hidden" id="triageCaseId" name="case_id">
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-6">
+                            <label class="form-label">Patient</label>
+                            <input type="text" class="form-control" id="triagePatientName" readonly>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Emergency ID</label>
+                            <input type="text" class="form-control" id="triageEmgNumber" readonly>
+                        </div>
+                    </div>
+
+                    <div class="p-3 mb-3" style="background:var(--mv-surface-1);border-radius:var(--mv-radius)">
+                        <h6 class="fw-bold mb-3"><i class="fas fa-heart-pulse me-2"></i>Vital Signs & Acuity Parameters</h6>
+                        <div class="row g-3">
+                            <div class="col-md-4">
+                                <label class="form-label">Blood Pressure (mmHg)</label>
+                                <div class="input-group">
+                                    <input type="number" class="form-control" name="bp_systolic" placeholder="Systolic (120)" min="40" max="260">
+                                    <span class="input-group-text">/</span>
+                                    <input type="number" class="form-control" name="bp_diastolic" placeholder="Diastolic (80)" min="20" max="180">
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label">Heart Rate (BPM)</label>
+                                <input type="number" class="form-control" name="heart_rate" placeholder="e.g. 88" min="30" max="240">
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label">Oxygen Saturation (SpO2 %)</label>
+                                <input type="number" class="form-control" name="spo2" placeholder="e.g. 98" min="50" max="100">
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label">Temperature (°F)</label>
+                                <input type="number" step="0.1" class="form-control" name="temperature" placeholder="e.g. 98.6" min="85" max="108">
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label">Respiratory Rate (breaths/min)</label>
+                                <input type="number" class="form-control" name="respiratory_rate" placeholder="e.g. 18" min="5" max="60">
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label">Consciousness (AVPU)</label>
+                                <select class="form-select" name="consciousness_level">
+                                    <option value="Alert">Alert (A)</option>
+                                    <option value="Voice">Voice Responding (V)</option>
+                                    <option value="Pain">Pain Responding (P)</option>
+                                    <option value="Unresponsive">Unresponsive (U)</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">Triage Category (Academic Simulation Model)</label>
+                        <select class="form-select" name="priority" id="triagePrioritySelect" required>
+                            <option value="">Select Acuity Classification...</option>
+                            <option value="P1">P1 — Critical (Immediate life threat / Resuscitation)</option>
+                            <option value="P2">P2 — High (Emergency / High acuity intervention)</option>
+                            <option value="P3">P3 — Moderate (Urgent care required within 30 min)</option>
+                            <option value="P4">P4 — Low (Non-urgent / Stable minor injury)</option>
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">Clinical Symptoms & Presentation</label>
+                        <textarea class="form-control" name="symptoms" rows="2" placeholder="Describe symptoms, onset, chest/neurological signs..."></textarea>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">Injury / Trauma Details</label>
+                        <textarea class="form-control" name="injury_details" rows="2" placeholder="Details of falls, fractures, lacerations, or burn mechanism..."></textarea>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">Nurse Assessment Notes & Interventions Initiated</label>
+                        <textarea class="form-control" name="assessment_notes" rows="2" placeholder="Oxygen initiated, IV line placed, ECG ordered..."></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="mv-btn mv-btn-outline" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="mv-btn mv-btn-primary" id="submitTriageBtn">Save Triage Assessment</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 2. Priority Engine Modal (Signature Feature) -->
+<div class="modal fade" id="engineModal" tabindex="-1" aria-labelledby="engineModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div>
+                    <h5 class="modal-title" id="engineModalLabel"><i class="fas fa-microchip me-2 text-primary"></i>MediCare Priority Engine</h5>
+                    <small class="text-muted">Dynamic clinical allocation & resource evaluation</small>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body" id="engineModalBody">
+                <div class="text-center py-5">
+                    <div class="spinner-border text-primary" role="status"></div>
+                    <p class="mt-2 text-muted">Evaluating clinical priority, doctor availability, and bed status...</p>
+                </div>
+            </div>
+            <div class="modal-footer" id="engineModalFooter">
+                <button type="button" class="mv-btn mv-btn-outline" data-bs-dismiss="modal">Close</button>
+                <button type="button" class="mv-btn mv-btn-primary" id="confirmEngineAllocationBtn">
+                    <i class="fas fa-check-circle me-1"></i> Confirm Recommended Allocation
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 3. Priority Reassessment Modal -->
+<div class="modal fade" id="priorityModal" tabindex="-1" aria-labelledby="priorityModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="priorityModalLabel"><i class="fas fa-arrow-down-up-across-line me-2"></i>Reassess Emergency Priority</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="priorityChangeForm">
+                    <input type="hidden" id="priorityCaseId">
+                    <div class="mb-3">
+                        <label class="form-label">New Acuity Category</label>
+                        <select class="form-select" id="newPrioritySelect" required>
+                            <option value="P1">P1 — Critical (Resuscitation)</option>
+                            <option value="P2">P2 — High (Emergency)</option>
+                            <option value="P3">P3 — Moderate (Urgent)</option>
+                            <option value="P4">P4 — Low (Non-urgent)</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">Mandatory Clinical / Operational Reason</label>
+                        <textarea class="form-control" id="priorityReason" rows="3" required placeholder="State physiological change, vital deterioration, or authorized clinical order..."></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="mv-btn mv-btn-outline" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="mv-btn mv-btn-primary" id="submitPriorityChangeBtn">Confirm Priority Update</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 4. Clinical Treatment & Interventions Modal -->
+<div class="modal fade" id="treatmentModal" tabindex="-1" aria-labelledby="treatmentModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="treatmentModalLabel"><i class="fas fa-syringe me-2"></i>Record Clinical Action / Treatment</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="treatmentForm">
+                    <input type="hidden" id="treatmentCaseId">
+                    <div class="mb-3">
+                        <label class="form-label">Action Classification</label>
+                        <select class="form-select" id="treatmentActionType">
+                            <option value="Observation">Observation & Monitoring</option>
+                            <option value="Medication Administered">Medication Administered</option>
+                            <option value="Procedure">Surgical / Resuscitation Procedure</option>
+                            <option value="Vitals Check">Vitals Recheck</option>
+                            <option value="Diagnostic Order">Diagnostic Order (ECG/Imaging)</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Action Description</label>
+                        <textarea class="form-control" id="treatmentDescription" rows="3" required placeholder="e.g. Aspirin 325mg given, Oxygen titrated to 98%, IV Cannula 18G inserted..."></textarea>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Doctor Notes / Physician Impression</label>
+                        <textarea class="form-control" id="treatmentDoctorNotes" rows="2" placeholder="Clinical reasoning, diagnostic plan..."></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="mv-btn mv-btn-outline" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="mv-btn mv-btn-primary" id="submitTreatmentBtn">Record Treatment</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 5. Inpatient Admission Modal -->
+<div class="modal fade" id="admissionModal" tabindex="-1" aria-labelledby="admissionModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="admissionModalLabel"><i class="fas fa-hospital-user me-2 text-primary"></i>Admit to Inpatient Ward</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="admissionForm">
+                    <input type="hidden" id="admissionCaseId">
+                    <div class="mb-3">
+                        <label class="form-label">Target Ward</label>
+                        <select class="form-select" id="admissionWardSelect" required>
+                            <option value="">Select Inpatient Ward...</option>
+                            <option value="General Ward">General Ward</option>
+                            <option value="ICU">Intensive Care Unit (ICU)</option>
+                            <option value="Pediatric Ward">Pediatric Ward</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Select Available Bed</label>
+                        <select class="form-select" id="admissionBedSelect" required>
+                            <option value="">Choose bed...</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Admitting Consultant</label>
+                        <select class="form-select" id="admittingDoctorSelect">
+                            <option value="">Choose doctor...</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Admission Clinical Notes</label>
+                        <textarea class="form-control" id="admissionNotes" rows="2" placeholder="Provisional diagnosis, bed transfer orders..."></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="mv-btn mv-btn-outline" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="mv-btn mv-btn-primary" id="submitAdmissionBtn">Confirm Inpatient Admission</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 6. Discharge Modal -->
+<div class="modal fade" id="dischargeModal" tabindex="-1" aria-labelledby="dischargeModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="dischargeModalLabel"><i class="fas fa-door-open me-2 text-success"></i>Discharge Emergency Patient</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="dischargeForm">
+                    <input type="hidden" id="dischargeCaseId">
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">Discharge Clinical Summary</label>
+                        <textarea class="form-control" id="dischargeSummary" rows="3" required placeholder="Patient stabilized, wound dressed, home instructions provided, follow-up in 3 days..."></textarea>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Emergency Ward Care Fee (₹)</label>
+                        <input type="number" class="form-control" id="dischargeFee" value="500" min="0">
+                        <small class="text-muted">Auto-generates invoice item on patient's account.</small>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="mv-btn mv-btn-outline" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="mv-btn mv-btn-primary" id="submitDischargeBtn">Process Discharge & Free Bed</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/mv-core.js"></script>
+<script src="/assets/js/mv-shell.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    let currentTab = 'queue';
+    let queueData = [];
+    let activeEngineRec = null;
+
+    // Bootstrap Modal instances
+    let triageModalInst, engineModalInst, priorityModalInst, treatmentModalInst, admissionModalInst, dischargeModalInst;
+
+    (async function init() {
+        const ctx = await MV.shell.mount({
+            roles: ['Admin', 'Doctor', 'Nurse', 'Receptionist'],
+            title: 'Emergency Ward',
+            subtitle: 'Live emergency triage, priority engine & patient queue'
+        });
+
+        ctx.actions.innerHTML =
+            '<button type="button" class="mv-btn mv-btn-outline me-2" id="refreshEmgBtn">' +
+              MV.icon('refresh-cw') + '<span>Refresh</span>' +
+            '</button>' +
+            '<button type="button" class="mv-btn mv-btn-primary" id="quickRegisterBtn">' +
+              MV.icon('user-plus') + '<span>Register Patient</span>' +
+            '</button>';
+        MV.icons(ctx.actions);
+
+        // Render Structure
+        ctx.content.innerHTML =
+            '<div class="emg-stat-grid" id="emgStats"></div>' +
+            '<div class="role-tabs" id="emgTabs">' +
+              '<button class="role-tab active" data-tab="queue"><i class="fas fa-list-ol"></i> Emergency Queue</button>' +
+              '<button class="role-tab" data-tab="register"><i class="fas fa-truck-medical"></i> Register Patient</button>' +
+              '<button class="role-tab" data-tab="matrix"><i class="fas fa-bed"></i> Doctors & Beds</button>' +
+              '<button class="role-tab" data-tab="active"><i class="fas fa-heart-pulse"></i> In-Treatment Cases</button>' +
+            '</div>' +
+            '<div id="emgTabContent"></div>';
+
+        // Modal initialization
+        triageModalInst = new bootstrap.Modal(document.getElementById('triageModal'));
+        engineModalInst = new bootstrap.Modal(document.getElementById('engineModal'));
+        priorityModalInst = new bootstrap.Modal(document.getElementById('priorityModal'));
+        treatmentModalInst = new bootstrap.Modal(document.getElementById('treatmentModal'));
+        admissionModalInst = new bootstrap.Modal(document.getElementById('admissionModal'));
+        dischargeModalInst = new bootstrap.Modal(document.getElementById('dischargeModal'));
+
+        // Event listeners
+        document.getElementById('refreshEmgBtn').addEventListener('click', function () {
+            loadDashboard();
+            renderActiveTab();
+        });
+
+        document.getElementById('quickRegisterBtn').addEventListener('click', function () {
+            switchTab('register');
+        });
+
+        document.querySelectorAll('#emgTabs .role-tab').forEach(function (tab) {
+            tab.addEventListener('click', function () {
+                switchTab(this.dataset.tab);
+            });
+        });
+
+        setupModalSubmissions();
+
+        // Initial Load
+        loadDashboard();
+        renderActiveTab();
+
+        // Auto-refresh queue every 30 seconds
+        setInterval(function () {
+            loadDashboard();
+            if (currentTab === 'queue' || currentTab === 'active' || currentTab === 'matrix') {
+                renderActiveTab(true);
+            }
+        }, 30000);
+    })();
+
+    function switchTab(tabKey) {
+        currentTab = tabKey;
+        document.querySelectorAll('#emgTabs .role-tab').forEach(function (t) {
+            t.classList.toggle('active', t.dataset.tab === tabKey);
+        });
+        renderActiveTab();
+    }
+
+    /* ---------------------------------------------------- 1. KPIs */
+    async function loadDashboard() {
+        try {
+            const stats = await MV.api.get('/api/emergency/dashboard');
+            const container = document.getElementById('emgStats');
+            if (!container) return;
+
+            container.innerHTML =
+                '<div class="emg-stat-card">' +
+                  '<div class="emg-stat-info"><div class="stat-label">Active Cases</div><div class="stat-val">' + stats.active_cases + '</div></div>' +
+                  '<div class="emg-stat-icon danger"><i class="fas fa-triangle-exclamation"></i></div>' +
+                '</div>' +
+                '<div class="emg-stat-card">' +
+                  '<div class="emg-stat-info"><div class="stat-label">P1 Critical</div><div class="stat-val text-danger">' + stats.critical_cases + '</div></div>' +
+                  '<div class="emg-stat-icon danger"><i class="fas fa-heart-pulse"></i></div>' +
+                '</div>' +
+                '<div class="emg-stat-card">' +
+                  '<div class="emg-stat-info"><div class="stat-label">P2 Urgent</div><div class="stat-val text-warning">' + stats.urgent_cases + '</div></div>' +
+                  '<div class="emg-stat-icon warning"><i class="fas fa-clock"></i></div>' +
+                '</div>' +
+                '<div class="emg-stat-card">' +
+                  '<div class="emg-stat-info"><div class="stat-label">Waiting in Queue</div><div class="stat-val">' + stats.waiting_patients + '</div></div>' +
+                  '<div class="emg-stat-icon primary"><i class="fas fa-users-line"></i></div>' +
+                '</div>' +
+                '<div class="emg-stat-card">' +
+                  '<div class="emg-stat-info"><div class="stat-label">Available Beds</div><div class="stat-val text-success">' + stats.available_emergency_beds + '</div></div>' +
+                  '<div class="emg-stat-icon success"><i class="fas fa-bed"></i></div>' +
+                '</div>' +
+                '<div class="emg-stat-card">' +
+                  '<div class="emg-stat-info"><div class="stat-label">On-Duty Doctors</div><div class="stat-val">' + stats.available_emergency_doctors + '</div></div>' +
+                  '<div class="emg-stat-icon purple"><i class="fas fa-user-doctor"></i></div>' +
+                '</div>';
+        } catch (err) {
+            console.error('Failed to load emergency dashboard KPIs:', err);
+        }
+    }
+
+    /* ---------------------------------------------------- 2. Tab Router */
+    async function renderActiveTab(silent) {
+        const slot = document.getElementById('emgTabContent');
+        if (!slot) return;
+
+        if (currentTab === 'queue') {
+            await renderQueueView(slot, silent);
+        } else if (currentTab === 'register') {
+            renderRegisterView(slot);
+        } else if (currentTab === 'matrix') {
+            await renderMatrixView(slot, silent);
+        } else if (currentTab === 'active') {
+            await renderActiveCasesView(slot, silent);
+        }
+    }
+
+    /* ---------------------------------------------------- 3. Emergency Queue */
+    async function renderQueueView(slot, silent) {
+        if (!silent) {
+            slot.innerHTML = '<div class="text-center py-5"><div class="spinner-border text-primary"></div></div>';
+        }
+        try {
+            queueData = await MV.api.get('/api/emergency/queue');
+            if (!queueData.length) {
+                slot.innerHTML = MV.emptyState({
+                    icon: 'check-circle',
+                    title: 'Emergency Queue is Clear',
+                    text: 'There are currently no waiting emergency patients.'
+                });
+                MV.icons(slot);
+                return;
+            }
+
+            let html =
+                '<div class="mv-card">' +
+                  '<div class="mv-card-head d-flex justify-content-between align-items-center">' +
+                    '<div><h3 class="m-0">Live Priority Queue</h3><small class="text-muted">Calculated by Triage Acuity (P1-P4) + Elapsed Wait Time</small></div>' +
+                    '<span class="badge bg-secondary">' + queueData.length + ' Active Case(s)</span>' +
+                  '</div>' +
+                  '<div class="table-responsive">' +
+                    '<table class="table table-emg table-hover m-0">' +
+                      '<thead><tr>' +
+                        '<th>#</th>' +
+                        '<th>Emergency ID</th>' +
+                        '<th>Patient</th>' +
+                        '<th>Arrival / Wait</th>' +
+                        '<th>Triage Acuity</th>' +
+                        '<th>Assigned Resources</th>' +
+                        '<th>Status</th>' +
+                        '<th class="text-end">Actions</th>' +
+                      '</tr></thead>' +
+                      '<tbody>';
+
+            queueData.forEach(function (c) {
+                const pClass = (c.triage_priority || 'P3').toLowerCase();
+                const arrivalFormatted = new Date(c.arrival_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+                html += '<tr>' +
+                    '<td class="fw-bold text-muted">' + c.queue_position + '</td>' +
+                    '<td><span class="fw-bold text-primary">' + MV.esc(c.emg_number) + '</span><br><small class="text-muted">' + MV.esc(c.arrival_method) + '</small></td>' +
+                    '<td><strong>' + MV.esc(c.patient_name) + '</strong> (' + c.gender + ', ' + c.age + 'y)<br><small class="text-muted text-truncate d-inline-block" style="max-width:240px">' + MV.esc(c.initial_complaint) + '</small></td>' +
+                    '<td>' + arrivalFormatted + '<br><small class="fw-semibold ' + (c.waiting_minutes > 30 ? 'text-danger' : 'text-muted') + '">' + c.waiting_minutes + ' min wait</small></td>' +
+                    '<td><span class="p-badge ' + pClass + '">' + (c.triage_priority || 'P3') + '</span></td>' +
+                    '<td>' +
+                      '<div><i class="fas fa-user-doctor me-1 text-muted"></i>' + (c.assigned_doctor_name ? MV.esc(c.assigned_doctor_name) : '<span class="text-muted">Unassigned</span>') + '</div>' +
+                      '<div><i class="fas fa-bed me-1 text-muted"></i>' + (c.bed_number ? MV.esc(c.ward_name + ' ' + c.bed_number) : '<span class="text-muted">No Bed</span>') + '</div>' +
+                    '</td>' +
+                    '<td>' + MV.badge(c.status) + '</td>' +
+                    '<td class="text-end text-nowrap">' +
+                      '<button type="button" class="mv-btn mv-btn-sm mv-btn-outline me-1" onclick="window.openPriorityEngine(' + c.case_id + ')" title="Run Priority Engine">' +
+                        '<i class="fas fa-microchip text-primary"></i> <span class="d-none d-md-inline">Engine</span>' +
+                      '</button>' +
+                      '<button type="button" class="mv-btn mv-btn-sm mv-btn-outline me-1" onclick="window.openTriageModal(' + c.case_id + ')" title="Triage Assessment">' +
+                        '<i class="fas fa-stethoscope text-danger"></i> <span class="d-none d-md-inline">Triage</span>' +
+                      '</button>' +
+                      '<button type="button" class="mv-btn mv-btn-sm mv-btn-outline" onclick="window.openPriorityChange(' + c.case_id + ', \'' + (c.triage_priority || 'P3') + '\')" title="Change Priority">' +
+                        '<i class="fas fa-arrow-down-up-across-line"></i>' +
+                      '</button>' +
+                    '</td>' +
+                  '</tr>';
+            });
+
+            html += '</tbody></table></div></div>';
+            slot.innerHTML = html;
+            MV.icons(slot);
+        } catch (err) {
+            slot.innerHTML = MV.emptyState({ icon: 'alert-circle', title: 'Could not load queue', text: err.message });
+        }
+    }
+
+    /* ---------------------------------------------------- 4. Register Patient Form */
+    function renderRegisterView(slot) {
+        slot.innerHTML =
+            '<div class="row justify-content-center">' +
+              '<div class="col-lg-8">' +
+                '<div class="mv-card">' +
+                  '<div class="mv-card-head">' +
+                    '<h3 class="m-0"><i class="fas fa-truck-medical me-2 text-danger"></i>Register Emergency Case</h3>' +
+                    '<small class="text-muted">Supports Registered Patients and Temporary Unconscious/Unidentified Arrivals</small>' +
+                  '</div>' +
+                  '<div class="p-4">' +
+                    '<form id="emgRegForm">' +
+                      '<div class="mb-4">' +
+                        '<label class="form-label fw-bold">Patient Category</label>' +
+                        '<div class="d-flex gap-3">' +
+                          '<div class="form-check">' +
+                            '<input class="form-check-input" type="radio" name="patient_type" id="typeRegistered" value="registered" checked>' +
+                            '<label class="form-check-label" for="typeRegistered">Existing Registered Patient</label>' +
+                          '</div>' +
+                          '<div class="form-check">' +
+                            '<input class="form-check-input" type="radio" name="patient_type" id="typeTemporary" value="temporary">' +
+                            '<label class="form-check-label" for="typeTemporary">Temporary / Unknown Patient</label>' +
+                          '</div>' +
+                        '</div>' +
+                      '</div>' +
+
+                      '<!-- Section: Registered Patient -->' +
+                      '<div id="secRegistered" class="mb-3">' +
+                        '<label class="form-label">Search Patient</label>' +
+                        '<input type="text" class="form-control" id="regPatientSearch" placeholder="Type name, email or phone..." autocomplete="off">' +
+                        '<input type="hidden" id="selectedPatientId" name="patient_id">' +
+                        '<div id="regPatientMatch" class="mt-2 text-primary fw-semibold small"></div>' +
+                      '</div>' +
+
+                      '<!-- Section: Temporary Unconscious Patient -->' +
+                      '<div id="secTemporary" class="mb-3 d-none">' +
+                        '<div class="row g-3">' +
+                          '<div class="col-md-5">' +
+                            '<label class="form-label">Temporary Identifier / Name</label>' +
+                            '<input type="text" class="form-control" name="temp_patient_name" placeholder="e.g. Unknown Male #1">' +
+                          '</div>' +
+                          '<div class="col-md-4">' +
+                            '<label class="form-label">Estimated Gender</label>' +
+                            '<select class="form-select" name="temp_patient_gender">' +
+                              '<option value="M">Male</option>' +
+                              '<option value="F">Female</option>' +
+                              '<option value="O">Other</option>' +
+                            '</select>' +
+                          '</div>' +
+                          '<div class="col-md-3">' +
+                            '<label class="form-label">Estimated Age</label>' +
+                            '<input type="number" class="form-control" name="temp_patient_age" placeholder="e.g. 40" min="0" max="120">' +
+                          '</div>' +
+                        '</div>' +
+                      '</div>' +
+
+                      '<div class="row g-3 mb-3">' +
+                        '<div class="col-md-6">' +
+                          '<label class="form-label">Arrival Method</label>' +
+                          '<select class="form-select" name="arrival_method" id="regArrivalMethod">' +
+                            '<option value="Walk-in">Walk-in</option>' +
+                            '<option value="Ambulance">Ambulance</option>' +
+                            '<option value="Referral">Referral from Clinic/Hospital</option>' +
+                            '<option value="Police">Police / Emergency Services</option>' +
+                          '</select>' +
+                        '</div>' +
+                        '<div class="col-md-6" id="secAmbulanceSelect">' +
+                          '<label class="form-label">Associated Ambulance (if applicable)</label>' +
+                          '<select class="form-select" name="ambulance_id" id="regAmbulanceId">' +
+                            '<option value="">None / Not recorded</option>' +
+                          '</select>' +
+                        '</div>' +
+                      '</div>' +
+
+                      '<div class="row g-3 mb-3">' +
+                        '<div class="col-md-6">' +
+                          '<label class="form-label">Contact Phone</label>' +
+                          '<input type="text" class="form-control" name="contact_phone" placeholder="Contact number">' +
+                        '</div>' +
+                        '<div class="col-md-6">' +
+                          '<label class="form-label">Emergency Next-of-Kin Contact</label>' +
+                          '<input type="text" class="form-control" name="emergency_contact" placeholder="Name and relation">' +
+                        '</div>' +
+                      '</div>' +
+
+                      '<div class="mb-3">' +
+                        '<label class="form-label fw-bold">Chief Presenting Complaint / Symptoms</label>' +
+                        '<textarea class="form-control" name="initial_complaint" rows="3" required placeholder="Describe primary symptoms, pain location, onset, trauma details..."></textarea>' +
+                      '</div>' +
+
+                      '<div class="mb-4">' +
+                        '<label class="form-label fw-bold">Initial Acuity Estimate</label>' +
+                        '<select class="form-select" name="triage_priority">' +
+                          '<option value="P1">P1 — Critical (Immediate life threat)</option>' +
+                          '<option value="P2">P2 — High (Severe trauma/pain/cardiac)</option>' +
+                          '<option value="P3" selected>P3 — Moderate (Urgent evaluation)</option>' +
+                          '<option value="P4">P4 — Low (Non-urgent minor illness)</option>' +
+                        '</select>' +
+                      '</div>' +
+
+                      '<div class="d-flex justify-content-end gap-2">' +
+                        '<button type="button" class="mv-btn mv-btn-outline" onclick="window.switchTab(\'queue\')">Cancel</button>' +
+                        '<button type="submit" class="mv-btn mv-btn-primary" id="btnSubmitReg">Register Emergency Patient</button>' +
+                      '</div>' +
+                    '</form>' +
+                  '</div>' +
+                '</div>' +
+              '</div>' +
+            '</div>';
+
+        // Load ambulances for selector
+        MV.api.get('/api/admin/ambulances').then(function (ambs) {
+            const sel = document.getElementById('regAmbulanceId');
+            if (sel && ambs) {
+                ambs.forEach(function (a) {
+                    const opt = document.createElement('option');
+                    opt.value = a.ambulance_id;
+                    opt.textContent = a.vehicle_number + ' (' + a.status + ')';
+                    sel.appendChild(opt);
+                });
+            }
+        }).catch(function () {});
+
+        // Patient type radio change
+        document.getElementById('typeRegistered').addEventListener('change', function () {
+            document.getElementById('secRegistered').classList.remove('d-none');
+            document.getElementById('secTemporary').classList.add('d-none');
+        });
+        document.getElementById('typeTemporary').addEventListener('change', function () {
+            document.getElementById('secRegistered').classList.add('d-none');
+            document.getElementById('secTemporary').classList.remove('d-none');
+            document.getElementById('selectedPatientId').value = '';
+        });
+
+        // Patient search debounce
+        const pSearch = document.getElementById('regPatientSearch');
+        pSearch.addEventListener('input', MV.debounce(async function () {
+            const q = pSearch.value.trim();
+            const matchSlot = document.getElementById('regPatientMatch');
+            if (q.length < 2) {
+                matchSlot.textContent = '';
+                document.getElementById('selectedPatientId').value = '';
+                return;
+            }
+            try {
+                const results = await MV.api.get('/api/admin/patients?q=' + encodeURIComponent(q));
+                if (results && results.length) {
+                    const first = results[0];
+                    document.getElementById('selectedPatientId').value = first.patient_id;
+                    matchSlot.innerHTML = 'Selected: <strong>' + MV.esc(first.name) + '</strong> (' + MV.esc(first.email) + ')';
+                } else {
+                    matchSlot.innerHTML = '<span class="text-danger">No patient found</span>';
+                    document.getElementById('selectedPatientId').value = '';
+                }
+            } catch (_) {}
+        }, 300));
+
+        // Submit form
+        document.getElementById('emgRegForm').addEventListener('submit', async function (e) {
+            e.preventDefault();
+            const form = e.target;
+            const data = Object.fromEntries(new FormData(form));
+
+            const isTemp = document.getElementById('typeTemporary').checked;
+            if (!isTemp && !data.patient_id) {
+                MV.toast({ message: 'Please select an existing patient or switch to Temporary Patient', type: 'danger' });
+                return;
+            }
+
+            const restore = MV.pending(document.getElementById('btnSubmitReg'), 'Registering...');
+            try {
+                const res = await MV.api.post('/api/emergency/register', data);
+                MV.toast({ message: res.message + ' (' + res.emg_number + ')', type: 'success' });
+                loadDashboard();
+                switchTab('queue');
+            } catch (err) {
+                MV.toast({ message: err.message, type: 'danger' });
+            } finally {
+                restore();
+            }
+        });
+    }
+
+    /* ---------------------------------------------------- 5. Doctors & Beds Matrix */
+    async function renderMatrixView(slot, silent) {
+        if (!silent) {
+            slot.innerHTML = '<div class="text-center py-5"><div class="spinner-border text-primary"></div></div>';
+        }
+        try {
+            const [doctors, beds] = await Promise.all([
+                MV.api.get('/api/emergency/doctors'),
+                MV.api.get('/api/emergency/beds')
+            ]);
+
+            let html =
+                '<div class="row g-4">' +
+                  '<!-- Doctors Roster -->' +
+                  '<div class="col-lg-5">' +
+                    '<div class="mv-card h-100">' +
+                      '<div class="mv-card-head">' +
+                        '<h3 class="m-0"><i class="fas fa-user-doctor me-2 text-primary"></i>Doctor Duty Roster</h3>' +
+                        '<small class="text-muted">Live shift status and active emergency workload</small>' +
+                      '</div>' +
+                      '<div class="p-3">' +
+                        '<div class="list-group list-group-flush">';
+
+            doctors.forEach(function (d) {
+                const onDuty = Boolean(d.is_on_duty);
+                html +=
+                    '<div class="list-group-item d-flex justify-content-between align-items-center px-0 py-3">' +
+                      '<div>' +
+                        '<div class="fw-bold">' + MV.esc(d.name) + '</div>' +
+                        '<small class="text-muted">' + MV.esc(d.specialization) + ' &bull; ' + MV.esc(d.department_name) + '</small><br>' +
+                        '<span class="badge ' + (onDuty ? 'bg-success' : 'bg-secondary') + ' me-1">' + (onDuty ? d.shift_type + ' Shift' : 'Off Shift') + '</span>' +
+                      '</div>' +
+                      '<div class="text-end">' +
+                        '<div class="fw-bold fs-5">' + d.active_cases + '</div>' +
+                        '<small class="text-muted">Active Cases</small>' +
+                      '</div>' +
+                    '</div>';
+            });
+
+            html +=
+                        '</div>' +
+                      '</div>' +
+                    '</div>' +
+                  '</div>' +
+
+                  '<!-- Bed Occupancy Matrix -->' +
+                  '<div class="col-lg-7">' +
+                    '<div class="mv-card h-100">' +
+                      '<div class="mv-card-head">' +
+                        '<h3 class="m-0"><i class="fas fa-bed me-2 text-danger"></i>Emergency & ICU Beds</h3>' +
+                        '<small class="text-muted">Real-time occupancy and telemetry bed tracking</small>' +
+                      '</div>' +
+                      '<div class="p-3">' +
+                        '<div class="bed-matrix">';
+
+            beds.forEach(function (b) {
+                const isAvail = b.status === 'Available';
+                const isOccup = b.status === 'Occupied';
+                const bClass = isAvail ? 'avail' : isOccup ? 'occup' : 'clean';
+                const statusBadge = isAvail ? 'Available' : isOccup ? (b.patient_name || b.emg_number || 'Occupied') : b.status;
+
+                html +=
+                    '<div class="bed-box ' + bClass + '">' +
+                      '<div class="d-flex justify-content-between">' +
+                        '<span class="bed-box-no">' + MV.esc(b.bed_number) + '</span>' +
+                        '<small class="badge ' + (isAvail ? 'bg-success' : isOccup ? 'bg-danger' : 'bg-warning') + '">' + (isAvail ? 'Free' : b.status) + '</small>' +
+                      '</div>' +
+                      '<small class="text-muted">' + MV.esc(b.ward_name) + '</small>' +
+                      '<div class="bed-box-pat">' + MV.esc(statusBadge) + '</div>' +
+                    '</div>';
+            });
+
+            html +=
+                        '</div>' +
+                      '</div>' +
+                    '</div>' +
+                  '</div>' +
+                '</div>';
+
+            slot.innerHTML = html;
+        } catch (err) {
+            slot.innerHTML = MV.emptyState({ icon: 'alert-circle', title: 'Could not load matrix', text: err.message });
+        }
+    }
+
+    /* ---------------------------------------------------- 6. Active In-Treatment Cases */
+    async function renderActiveCasesView(slot, silent) {
+        if (!silent) {
+            slot.innerHTML = '<div class="text-center py-5"><div class="spinner-border text-primary"></div></div>';
+        }
+        try {
+            const cases = await MV.api.get('/api/emergency/queue');
+            const inTreatment = cases.filter(function (c) {
+                return c.status === 'In Treatment' || c.status === 'Assigned';
+            });
+
+            if (!inTreatment.length) {
+                slot.innerHTML = MV.emptyState({
+                    icon: 'bed-pulse',
+                    title: 'No Active Treatments in Progress',
+                    text: 'Patients assigned to a doctor or bed will appear here for clinical recording.'
+                });
+                MV.icons(slot);
+                return;
+            }
+
+            let html =
+                '<div class="row g-3">';
+
+            inTreatment.forEach(function (c) {
+                const pClass = (c.triage_priority || 'P3').toLowerCase();
+                html +=
+                    '<div class="col-md-6 col-lg-4">' +
+                      '<div class="mv-card h-100 p-3 d-flex flex-column justify-content-between">' +
+                        '<div>' +
+                          '<div class="d-flex justify-content-between align-items-center mb-2">' +
+                            '<span class="fw-bold text-primary">' + MV.esc(c.emg_number) + '</span>' +
+                            '<span class="p-badge ' + pClass + '">' + (c.triage_priority || 'P3') + '</span>' +
+                          '</div>' +
+                          '<h5 class="fw-bold mb-1">' + MV.esc(c.patient_name) + '</h5>' +
+                          '<p class="text-muted small mb-2">' + MV.esc(c.initial_complaint) + '</p>' +
+                          '<div class="p-2 mb-3" style="background:var(--mv-surface-1);border-radius:var(--mv-radius);font-size:.8125rem">' +
+                            '<div><strong>Assigned Doctor:</strong> ' + (c.assigned_doctor_name ? MV.esc(c.assigned_doctor_name) : 'None') + '</div>' +
+                            '<div><strong>Bed:</strong> ' + (c.bed_number ? MV.esc(c.ward_name + ' ' + c.bed_number) : 'Not allocated') + '</div>' +
+                          '</div>' +
+                        '</div>' +
+                        '<div class="d-flex flex-wrap gap-2 mt-2">' +
+                          '<button type="button" class="mv-btn mv-btn-sm mv-btn-primary flex-fill" onclick="window.openTreatmentModal(' + c.case_id + ')">' +
+                            '<i class="fas fa-syringe me-1"></i> Treatment' +
+                          '</button>' +
+                          '<button type="button" class="mv-btn mv-btn-sm mv-btn-outline flex-fill" onclick="window.openAdmissionModal(' + c.case_id + ')">' +
+                            '<i class="fas fa-hospital me-1"></i> Admit' +
+                          '</button>' +
+                          '<button type="button" class="mv-btn mv-btn-sm mv-btn-outline flex-fill text-danger" onclick="window.openDischargeModal(' + c.case_id + ')">' +
+                            '<i class="fas fa-door-open me-1"></i> Discharge' +
+                          '</button>' +
+                        '</div>' +
+                      '</div>' +
+                    '</div>';
+            });
+
+            html += '</div>';
+            slot.innerHTML = html;
+        } catch (err) {
+            slot.innerHTML = MV.emptyState({ icon: 'alert-circle', title: 'Could not load active cases', text: err.message });
+        }
+    }
+
+    /* ---------------------------------------------------- 7. Modal Handlers & Actions */
+    window.switchTab = switchTab;
+
+    // Triage Modal
+    window.openTriageModal = async function (caseId) {
+        try {
+            const data = await MV.api.get('/api/emergency/cases/' + caseId);
+            const c = data.case;
+            document.getElementById('triageCaseId').value = c.case_id;
+            document.getElementById('triagePatientName').value = c.patient_name;
+            document.getElementById('triageEmgNumber').value = c.emg_number;
+            document.getElementById('triagePrioritySelect').value = c.triage_priority || 'P3';
+            triageModalInst.show();
+        } catch (err) {
+            MV.toast({ message: 'Failed to open triage: ' + err.message, type: 'danger' });
+        }
+    };
+
+    // Priority Engine Modal
+    window.openPriorityEngine = async function (caseId) {
+        const body = document.getElementById('engineModalBody');
+        body.innerHTML = '<div class="text-center py-5"><div class="spinner-border text-primary"></div><p class="mt-2 text-muted">Running MediCare Priority Engine...</p></div>';
+        engineModalInst.show();
+
+        try {
+            const rec = await MV.api.get('/api/emergency/priority-engine/' + caseId);
+            activeEngineRec = rec;
+
+            let docHtml = '<span class="text-danger">No doctor available</span>';
+            if (rec.recommended_doctor) {
+                docHtml = '<div><strong>' + MV.esc(rec.recommended_doctor.name) + '</strong> (' + MV.esc(rec.recommended_doctor.specialization) + ')</div>' +
+                    '<div class="engine-reason">' + MV.esc(rec.recommended_doctor.reason) + '</div>';
+            }
+
+            let bedHtml = '<span class="text-warning">No free emergency bed</span>';
+            if (rec.recommended_bed) {
+                bedHtml = '<div><strong>' + MV.esc(rec.recommended_bed.ward_name) + ' — ' + MV.esc(rec.recommended_bed.bed_number) + '</strong></div>' +
+                    '<div class="engine-reason">' + MV.esc(rec.recommended_bed.reason) + '</div>';
+            }
+
+            let deptHtml = '<strong>' + MV.esc(rec.recommended_department.name) + '</strong><div class="engine-reason">' + MV.esc(rec.recommended_department.reason) + '</div>';
+
+            body.innerHTML =
+                '<div class="engine-rec-box">' +
+                  '<div class="d-flex justify-content-between align-items-center mb-3">' +
+                    '<div><h5 class="fw-bold mb-0">' + MV.esc(rec.emg_number) + ' &bull; ' + MV.esc(rec.patient_name) + '</h5><small class="text-muted">Wait: ' + rec.waiting_minutes + ' min</small></div>' +
+                    '<span class="p-badge ' + (rec.current_priority || 'P3').toLowerCase() + '">' + rec.current_priority + '</span>' +
+                  '</div>' +
+                  '<div class="engine-rec-item">' +
+                    '<span class="engine-rec-label">Recommended Doctor</span>' +
+                    '<div class="engine-rec-val">' + docHtml + '</div>' +
+                  '</div>' +
+                  '<div class="engine-rec-item">' +
+                    '<span class="engine-rec-label">Recommended Bed</span>' +
+                    '<div class="engine-rec-val">' + bedHtml + '</div>' +
+                  '</div>' +
+                  '<div class="engine-rec-item">' +
+                    '<span class="engine-rec-label">Target Department</span>' +
+                    '<div class="engine-rec-val">' + deptHtml + '</div>' +
+                  '</div>' +
+                '</div>' +
+                '<div class="alert alert-info py-2 px-3 small mb-0">' +
+                  '<i class="fas fa-info-circle me-1"></i> ' + MV.esc(rec.clinical_notice) +
+                '</div>';
+        } catch (err) {
+            body.innerHTML = MV.emptyState({ icon: 'alert-circle', title: 'Engine Error', text: err.message });
+        }
+    };
+
+    // Priority Change Modal
+    window.openPriorityChange = function (caseId, currentPriority) {
+        document.getElementById('priorityCaseId').value = caseId;
+        document.getElementById('newPrioritySelect').value = currentPriority;
+        document.getElementById('priorityReason').value = '';
+        priorityModalInst.show();
+    };
+
+    // Treatment Modal
+    window.openTreatmentModal = function (caseId) {
+        document.getElementById('treatmentCaseId').value = caseId;
+        document.getElementById('treatmentForm').reset();
+        treatmentModalInst.show();
+    };
+
+    // Admission Modal
+    let admissionBedsCache = [];
+    window.openAdmissionModal = async function (caseId) {
+        document.getElementById('admissionCaseId').value = caseId;
+        document.getElementById('admissionForm').reset();
+
+        try {
+            const [beds, doctors] = await Promise.all([
+                MV.api.get('/api/emergency/beds'),
+                MV.api.get('/api/admin/doctors')
+            ]);
+
+            admissionBedsCache = beds.filter(function (b) { return b.status === 'Available'; });
+
+            const wardSel = document.getElementById('admissionWardSelect');
+            const bedSel = document.getElementById('admissionBedSelect');
+
+            function populateBeds(filterWard) {
+                bedSel.innerHTML = '<option value="">Select Inpatient Bed...</option>';
+                const filtered = filterWard ? admissionBedsCache.filter(function (b) { return b.ward_name === filterWard; }) : admissionBedsCache;
+                filtered.forEach(function (b) {
+                    const opt = document.createElement('option');
+                    opt.value = b.bed_id;
+                    opt.textContent = b.ward_name + ' — ' + b.bed_number;
+                    opt.setAttribute('data-ward', b.ward_name);
+                    bedSel.appendChild(opt);
+                });
+            }
+
+            populateBeds(wardSel.value);
+
+            wardSel.onchange = function () {
+                populateBeds(this.value);
+            };
+
+            bedSel.onchange = function () {
+                const opt = this.options[this.selectedIndex];
+                if (opt && opt.getAttribute('data-ward')) {
+                    wardSel.value = opt.getAttribute('data-ward');
+                }
+            };
+
+            const docSel = document.getElementById('admittingDoctorSelect');
+            docSel.innerHTML = '<option value="">Choose Admitting Consultant...</option>';
+            doctors.forEach(function (d) {
+                const opt = document.createElement('option');
+                opt.value = d.doctor_id;
+                opt.textContent = (MV.fmt.docName ? MV.fmt.docName(d.name) : d.name) + ' (' + d.specialization + ')';
+                docSel.appendChild(opt);
+            });
+
+            admissionModalInst.show();
+        } catch (err) {
+            MV.toast({ message: 'Failed to prepare admission: ' + err.message, type: 'danger' });
+        }
+    };
+
+    // Discharge Modal
+    window.openDischargeModal = function (caseId) {
+        document.getElementById('dischargeCaseId').value = caseId;
+        document.getElementById('dischargeForm').reset();
+        dischargeModalInst.show();
+    };
+
+    /* ---------------------------------------------------- 8. Submissions */
+    function setupModalSubmissions() {
+        // Triage Submit
+        document.getElementById('submitTriageBtn').addEventListener('click', async function () {
+            const form = document.getElementById('triageForm');
+            if (!form.checkValidity()) return form.reportValidity();
+            const data = Object.fromEntries(new FormData(form));
+            const caseId = document.getElementById('triageCaseId').value;
+
+            const restore = MV.pending(this, 'Saving...');
+            try {
+                await MV.api.post('/api/emergency/triage/' + caseId, data);
+                MV.toast({ message: 'Triage assessment saved', type: 'success' });
+                triageModalInst.hide();
+                loadDashboard();
+                renderActiveTab();
+            } catch (err) {
+                MV.toast({ message: err.message, type: 'danger' });
+            } finally {
+                restore();
+            }
+        });
+
+        // Priority Engine Confirm Allocation
+        document.getElementById('confirmEngineAllocationBtn').addEventListener('click', async function () {
+            if (!activeEngineRec) return;
+            const payload = {
+                doctor_id: activeEngineRec.recommended_doctor ? activeEngineRec.recommended_doctor.doctor_id : null,
+                bed_id: activeEngineRec.recommended_bed ? activeEngineRec.recommended_bed.bed_id : null,
+                department_id: activeEngineRec.recommended_department ? activeEngineRec.recommended_department.id : null
+            };
+
+            const restore = MV.pending(this, 'Allocating...');
+            try {
+                await MV.api.post('/api/emergency/allocate/' + activeEngineRec.case_id, payload);
+                MV.toast({ message: 'Doctor and bed successfully allocated', type: 'success' });
+                engineModalInst.hide();
+                loadDashboard();
+                renderActiveTab();
+            } catch (err) {
+                MV.toast({ message: err.message, type: 'danger' });
+            } finally {
+                restore();
+            }
+        });
+
+        // Priority Reassessment Submit
+        document.getElementById('submitPriorityChangeBtn').addEventListener('click', async function () {
+            const caseId = document.getElementById('priorityCaseId').value;
+            const new_priority = document.getElementById('newPrioritySelect').value;
+            const reason = document.getElementById('priorityReason').value;
+
+            if (!reason.trim()) {
+                MV.toast({ message: 'Mandatory reason is required', type: 'danger' });
+                return;
+            }
+
+            const restore = MV.pending(this, 'Updating...');
+            try {
+                await MV.api.patch('/api/emergency/priority/' + caseId, { new_priority, reason });
+                MV.toast({ message: 'Priority updated', type: 'success' });
+                priorityModalInst.hide();
+                loadDashboard();
+                renderActiveTab();
+            } catch (err) {
+                MV.toast({ message: err.message, type: 'danger' });
+            } finally {
+                restore();
+            }
+        });
+
+        // Treatment Submit
+        document.getElementById('submitTreatmentBtn').addEventListener('click', async function () {
+            const caseId = document.getElementById('treatmentCaseId').value;
+            const action_type = document.getElementById('treatmentActionType').value;
+            const description = document.getElementById('treatmentDescription').value;
+            const notes = document.getElementById('treatmentDoctorNotes').value;
+
+            if (!description.trim()) {
+                MV.toast({ message: 'Action description is required', type: 'danger' });
+                return;
+            }
+
+            const restore = MV.pending(this, 'Recording...');
+            try {
+                await MV.api.post('/api/emergency/treatment/' + caseId, { action_type, description, notes });
+                MV.toast({ message: 'Treatment recorded', type: 'success' });
+                treatmentModalInst.hide();
+                renderActiveTab();
+            } catch (err) {
+                MV.toast({ message: err.message, type: 'danger' });
+            } finally {
+                restore();
+            }
+        });
+
+        // Inpatient Admission Submit
+        document.getElementById('submitAdmissionBtn').addEventListener('click', async function () {
+            const caseId = document.getElementById('admissionCaseId').value;
+            let ward_name = document.getElementById('admissionWardSelect').value;
+            const bed_id = document.getElementById('admissionBedSelect').value;
+            const admitting_doctor_id = document.getElementById('admittingDoctorSelect').value;
+            const admission_notes = document.getElementById('admissionNotes').value;
+
+            if (!bed_id) {
+                MV.toast({ message: 'Please select an available bed', type: 'danger' });
+                return;
+            }
+
+            if (!ward_name) {
+                const bedOpt = document.getElementById('admissionBedSelect').selectedOptions[0];
+                if (bedOpt && bedOpt.getAttribute('data-ward')) {
+                    ward_name = bedOpt.getAttribute('data-ward');
+                }
+            }
+
+            const restore = MV.pending(this, 'Admitting...');
+            try {
+                await MV.api.post('/api/emergency/admit/' + caseId, {
+                    ward_name, bed_id, admitting_doctor_id, admission_notes
+                });
+                MV.toast({ message: 'Patient admitted successfully' + (ward_name ? ' to ' + ward_name : ''), type: 'success' });
+                admissionModalInst.hide();
+                loadDashboard();
+                renderActiveTab();
+            } catch (err) {
+                MV.toast({ message: err.message, type: 'danger' });
+            } finally {
+                restore();
+            }
+        });
+
+        // Discharge Submit
+        document.getElementById('submitDischargeBtn').addEventListener('click', async function () {
+            const caseId = document.getElementById('dischargeCaseId').value;
+            const discharge_summary = document.getElementById('dischargeSummary').value;
+            const emergency_fee = document.getElementById('dischargeFee').value;
+
+            if (!discharge_summary.trim()) {
+                MV.toast({ message: 'Discharge summary is required', type: 'danger' });
+                return;
+            }
+
+            const restore = MV.pending(this, 'Discharging...');
+            try {
+                await MV.api.post('/api/emergency/discharge/' + caseId, {
+                    discharge_summary, emergency_fee
+                });
+                MV.toast({ message: 'Patient discharged and bed released', type: 'success' });
+                dischargeModalInst.hide();
+                loadDashboard();
+                renderActiveTab();
+            } catch (err) {
+                MV.toast({ message: err.message, type: 'danger' });
+            } finally {
+                restore();
+            }
+        });
+    }
+})();
+</script>
+</body>
+</html>
+

@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>404 · MediCare</title>
+
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link href="/assets/css/medivault-restyle.css" rel="stylesheet">
+<style>
+.error-container {
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: var(--mv-bg); padding: 2rem;
+}
+.error-card {
+    max-width: 500px; width: 100%; text-align: center; padding: 3rem 2rem;
+    background: var(--mv-surface-0); border-radius: var(--mv-radius-xl); border: 1px solid var(--mv-border);
+}
+.error-code {
+    font-size: 6rem; font-weight: 700; color: var(--mv-primary); line-height: 1; margin-bottom: 1rem;
+}
+.error-title {
+    font-size: 1.5rem; font-weight: 600; margin-bottom: .75rem; color: var(--mv-text);
+}
+.error-text {
+    font-size: .9375rem; color: var(--mv-text-muted); margin-bottom: 2rem; line-height: 1.6;
+}
+.error-actions {
+    display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap;
+}
+.error-icon {
+    width: 80px; height: 80px; margin: 0 auto 1.5rem; background: var(--mv-surface-1); border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; color: var(--mv-primary);
+}
+</style>
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<script src="/assets/js/theme-init.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+
+<div class="error-container">
+    <div class="error-card">
+        <div class="error-icon">
+            <i data-lucide="file-question" style="width:48px;height:48px;stroke-width:1.5"></i>
+        </div>
+        <div class="error-code">404</div>
+        <h1 class="error-title">Page Not Found</h1>
+        <p class="error-text">
+            The page you're looking for doesn't exist or has been moved.
+        </p>
+        <div class="error-actions">
+            <button onclick="history.back()" class="mv-btn mv-btn-secondary">Go Back</button>
+            <a href="/" class="mv-btn mv-btn-primary">Go Home</a>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Icon already in Font Awesome
+    document.querySelector('.error-icon i').outerHTML = '<i class="fas fa-question-circle" style="font-size:48px;color:var(--mv-primary)"></i>';
+</script>
+</body>
+</html>

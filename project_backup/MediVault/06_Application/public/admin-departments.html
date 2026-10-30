@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Departments · MediCare</title>
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link href="/assets/css/medivault-restyle.css" rel="stylesheet">
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<script src="/assets/js/theme-init.js"></script>
+<script src="/runtime-config.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+<div class="mv-layout" id="mvShell"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/mv-core.js"></script>
+<script src="/assets/js/mv-shell.js"></script>
+<script>
+(function () {
+    'use strict';
+    (async function init() {
+        const ctx = await MV.shell.mount({ roles: ['Admin'], title: 'Departments', subtitle: 'Hospital departments overview' });
+
+        ctx.actions.innerHTML =
+            '<button type="button" class="mv-btn mv-btn-outline" id="refreshBtn"><i class="fas fa-sync-alt"></i><span>Refresh</span></button>';
+
+        ctx.content.innerHTML =
+            '<div class="mv-card">' +
+              '<div class="mv-card-body" id="deptSlot"></div>' +
+            '</div>' +
+            '<div class="mv-footer">MediCare - Hospital Management System</div>';
+
+        document.getElementById('refreshBtn').addEventListener('click', function () { table.reload(); });
+
+        const table = new MV.DataTable(document.getElementById('deptSlot'), {
+            columns: [
+                { key: 'department_id',   label: 'ID' },
+                { key: 'department_name', label: 'Department Name' },
+                { key: 'floor_no',        label: 'Floor', render: function (r) { return r.floor_no != null ? r.floor_no : '-'; } },
+                { key: 'hod_name',        label: 'Head of Department', render: function (r) { return r.hod_name || '-'; } },
+                { key: 'doctor_count',    label: 'Doctors' }
+            ],
+            fetch: function () { return MV.api.get('/api/admin/departments/detail'); },
+            searchKeys: ['department_name', 'hod_name'],
+            pageSize: 15,
+            searchPlaceholder: 'Search departments...'
+        });
+    })();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Patient Portal · MediCare</title>
+
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link href="/assets/css/medivault-restyle.css" rel="stylesheet">
+<style>
+/* Hero: Booking wizard with 4-step progress */
+.hero {
+    background: linear-gradient(135deg, var(--mv-primary) 0%, #0D47A1 100%);
+    border-radius: var(--mv-radius-card);
+    padding: 32px;
+    color: white;
+    margin-bottom: 24px;
+}
+.hero h2 { font-size: 28px; font-weight: 700; margin: 0 0 8px; font-family: 'Poppins', sans-serif; }
+.hero p { font-size: 15px; opacity: 0.9; margin: 0; }
+
+.wizard-progress {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 32px;
+    position: relative;
+}
+.wizard-progress::before {
+    content: '';
+    position: absolute;
+    top: 18px;
+    left: 10%;
+    right: 10%;
+    height: 2px;
+    background: var(--mv-border);
+    z-index: 0;
+}
+.wizard-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    position: relative;
+    z-index: 1;
+    flex: 1;
+}
+.wizard-step-num {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--mv-bg);
+    border: 2px solid var(--mv-border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    color: var(--mv-text-muted);
+    font-size: 14px;
+}
+.wizard-step.active .wizard-step-num {
+    background: var(--mv-primary);
+    border-color: var(--mv-primary);
+    color: white;
+}
+.wizard-step.completed .wizard-step-num {
+    background: var(--mv-success);
+    border-color: var(--mv-success);
+    color: white;
+}
+.wizard-step-label {
+    font-size: 11px;
+    margin-top: 8px;
+    color: var(--mv-text-muted);
+    text-align: center;
+}
+.wizard-step.active .wizard-step-label {
+    color: var(--mv-primary);
+    font-weight: 600;
+}
+
+.wizard-content { min-height: 280px; }
+
+.dept-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 12px;
+}
+.dept-card {
+    padding: 20px;
+    background: var(--mv-surface);
+    border-radius: var(--mv-radius-card);
+    border: 2px solid var(--mv-border);
+    cursor: pointer;
+    transition: all 0.15s;
+    text-align: center;
+}
+.dept-card:hover {
+    border-color: var(--mv-primary);
+    transform: translateY(-2px);
+}
+.dept-card.selected {
+    border-color: var(--mv-primary);
+    background: var(--mv-primary);
+    color: white;
+}
+.dept-card h6 {
+    font-size: 14px;
+    font-weight: 600;
+    margin: 8px 0 0;
+}
+
+.doctor-list { display: grid; gap: 12px; }
+.doctor-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    background: var(--mv-surface);
+    border-radius: var(--mv-radius-card);
+    border: 2px solid var(--mv-border);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.doctor-card:hover {
+    border-color: var(--mv-primary);
+}
+.doctor-card.selected {
+    border-color: var(--mv-primary);
+    background: var(--mv-primary);
+    color: white;
+}
+.doctor-avatar {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: var(--mv-primary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-weight: 700;
+    font-size: 14px;
+}
+.doctor-card.selected .doctor-avatar {
+    background: white;
+    color: var(--mv-primary);
+}
+.doctor-info h6 {
+    font-size: 14px;
+    font-weight: 600;
+    margin: 0;
+}
+.doctor-info p {
+    font-size: 12px;
+    margin: 4px 0 0;
+    opacity: 0.8;
+}
+
+.calendar-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 8px;
+}
+.calendar-day {
+    aspect-ratio: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    border: 1px solid var(--mv-border);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    transition: all 0.15s;
+}
+.calendar-day:hover {
+    border-color: var(--mv-primary);
+    background: var(--mv-bg);
+}
+.calendar-day.selected {
+    background: var(--mv-primary);
+    color: white;
+    border-color: var(--mv-primary);
+}
+.calendar-day.disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
+.time-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+    gap: 10px;
+}
+.time-slot {
+    padding: 10px;
+    border-radius: 6px;
+    border: 1px solid var(--mv-border);
+    text-align: center;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 13px;
+    transition: all 0.15s;
+}
+.time-slot:hover {
+    border-color: var(--mv-primary);
+    background: var(--mv-bg);
+}
+.time-slot.selected {
+    background: var(--mv-primary);
+    color: white;
+    border-color: var(--mv-primary);
+}
+</style>
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<script src="/assets/js/theme-init.js"></script>
+<script src="/runtime-config.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+
+<div class="mv-layout" id="mvShell"></div>
+
+<!-- Booking wizard modal -->
+<div class="modal fade" id="bookingModal" tabindex="-1" data-bs-backdrop="static">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Book Appointment</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="wizard-progress" id="wizardProgress"></div>
+                <div class="wizard-content" id="wizardContent"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" id="wizardBack" style="display:none">Back</button>
+                <button type="button" class="mv-btn mv-btn-primary" id="wizardNext">Next</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/mv-core.js"></script>
+<script src="/assets/js/mv-shell.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    /* Patient Portal - HERO is 4-step booking wizard */
+
+    let summary = {};
+    let wizardStep = 0;
+    let bookingData = { department_id: null, doctor_id: null, appointment_date: null, appointment_time: null };
+    let departments = [];
+    let doctors = [];
+    let availableSlots = [];
+    let modalInst;
+
+    (async function init() {
+        const ctx = await MV.shell.mount({
+            roles: ['Patient'],
+            title: 'Your care',
+            subtitle: 'Appointments and personal health records'
+        });
+
+        ctx.actions.innerHTML =
+            '<button type="button" class="mv-btn mv-btn-primary" onclick="showBookingWizard()">' +
+              '<i class="fas fa-calendar-plus"></i><span>Book Appointment</span>' +
+            '</button>';
+
+        ctx.content.innerHTML =
+            '<div class="row g-3 mb-3">' +
+              '<div class="col-md-4">' +
+                '<div class="mv-stat">' +
+                  '<div class="mv-stat-label">Next Appointment</div>' +
+                  '<div class="mv-stat-value" id="nextAppt">--</div>' +
+                '</div>' +
+              '</div>' +
+              '<div class="col-md-4">' +
+                '<div class="mv-stat">' +
+                  '<div class="mv-stat-label">Medical Records</div>' +
+                  '<div class="mv-stat-value" id="recordCount">--</div>' +
+                '</div>' +
+              '</div>' +
+              '<div class="col-md-4">' +
+                '<div class="mv-stat">' +
+                  '<div class="mv-stat-label">Pending Bills</div>' +
+                  '<div class="mv-stat-value" id="billCount">--</div>' +
+                '</div>' +
+              '</div>' +
+            '</div>' +
+            '<section class="patient-records"><h2>Your bills</h2><div id="patientBills" data-testid="patient-bills-view"></div></section>' +
+            '<section class="patient-records"><h2>Medical records</h2><div id="patientRecords"></div></section>' +
+            '<div class="mv-footer">' +
+              'MediCare - Hospital Management System' +
+            '</div>';
+
+        modalInst = new bootstrap.Modal(document.getElementById('bookingModal'));
+
+        document.getElementById('wizardNext').addEventListener('click', handleWizardNext);
+        document.getElementById('wizardBack').addEventListener('click', function () {
+            wizardStep--;
+            renderWizardStep();
+        });
+
+        loadHome();
+    })();
+
+    window.showBookingWizard = function () {
+        wizardStep = 0;
+        bookingData = { department_id: null, doctor_id: null, appointment_date: null, appointment_time: null };
+        renderWizardStep();
+        modalInst.show();
+    };
+
+    async function loadHome() {
+        try {
+            summary = await MV.api.get('/api/patient/summary');
+            document.getElementById('nextAppt').textContent = summary.next_appointment_date
+                ? MV.fmt.dateIndian(summary.next_appointment_date)
+                : 'None';
+            document.getElementById('recordCount').textContent = summary.record_count || 0;
+            document.getElementById('billCount').textContent = summary.pending_bills || 0;
+            const [bills,records] = await Promise.all([MV.api.get('/api/patient/bills'),MV.api.get('/api/patient/records')]);
+            document.getElementById('patientBills').innerHTML = bills.length ? MV.table({columns:['Bill','Date','Amount','Status',''],rows:bills.map(b=>[
+                '#'+b.bill_id,MV.fmt.date(b.bill_date),MV.fmt.money(b.total_amount),MV.badge(b.payment_status),'<a class="mv-btn mv-btn-outline mv-btn-sm" data-testid="patient-view-bill-'+b.bill_id+'" href="/billing.html?id='+b.bill_id+'">View bill</a>'
+            ])}) : '<p class="text-muted">No bills on record.</p>';
+            document.getElementById('patientRecords').innerHTML = records.length ? records.map(r=>'<article><small class="text-muted">'+MV.fmt.date(r.created_at)+'</small><p class="mb-0">'+MV.esc(r.diagnosis_summary)+'</p></article>').join('') : '<p class="text-muted">No medical records on file.</p>';
+        } catch (err) {
+            MV.toast.error('Could not load your records',err.message);
+        }
+    }
+
+    async function handleWizardNext() {
+        if (wizardStep === 0 && !bookingData.department_id) {
+            return MV.toast.warn('Select department');
+        }
+        if (wizardStep === 1 && !bookingData.doctor_id) {
+            return MV.toast.warn('Select doctor');
+        }
+        if (wizardStep === 2 && !bookingData.appointment_date) {
+            return MV.toast.warn('Select date');
+        }
+        if (wizardStep === 3 && !bookingData.appointment_time) {
+            return MV.toast.warn('Select time');
+        }
+
+        if (wizardStep === 3) {
+            const restore = MV.pending(document.getElementById('wizardNext'),'Booking…');
+            try {
+                await MV.api.post('/api/patient/book-appointment', bookingData);
+                MV.toast.success('Appointment booked');
+                modalInst.hide();
+                loadHome();
+            } catch (err) {
+                MV.toast.error('Booking failed', err.message);
+            } finally {
+                restore();
+            }
+            return;
+        }
+
+        wizardStep++;
+        await renderWizardStep();
+    }
+
+    async function renderWizardStep() {
+        const progress = document.getElementById('wizardProgress');
+        const content = document.getElementById('wizardContent');
+        const backBtn = document.getElementById('wizardBack');
+        const nextBtn = document.getElementById('wizardNext');
+
+        backBtn.style.display = wizardStep > 0 ? 'inline-block' : 'none';
+        nextBtn.textContent = wizardStep === 3 ? 'Confirm' : 'Next';
+
+        const steps = ['Department', 'Doctor', 'Date', 'Time'];
+        progress.innerHTML = steps.map(function (label, i) {
+            const state = i < wizardStep ? 'completed' : i === wizardStep ? 'active' : '';
+            return '<div class="wizard-step ' + state + '">' +
+                '<div class="wizard-step-num">' + (i + 1) + '</div>' +
+                '<div class="wizard-step-label">' + label + '</div>' +
+              '</div>';
+        }).join('');
+
+        if (wizardStep === 0) {
+            await renderDepartments(content);
+        } else if (wizardStep === 1) {
+            await renderDoctors(content);
+        } else if (wizardStep === 2) {
+            renderCalendar(content);
+        } else if (wizardStep === 3) {
+            await renderTimeSlots(content);
+        }
+    }
+
+    async function renderDepartments(container) {
+        container.innerHTML = '<div class="text-center py-4"><div class="spinner-border text-primary"></div></div>';
+        try {
+            departments = await MV.api.get('/api/patient/departments');
+            container.innerHTML = '<h6 style="margin-bottom:16px">Select Department</h6>' +
+                '<div class="dept-grid">' +
+                  departments.map(function (d) {
+                      const sel = d.department_id === bookingData.department_id ? 'selected' : '';
+                      return '<div class="dept-card ' + sel + '" onclick="selectDept(' + d.department_id + ')">' +
+                          '<i class="fas fa-hospital" style="font-size:24px"></i>' +
+                          '<h6>' + MV.esc(d.department_name) + '</h6>' +
+                        '</div>';
+                  }).join('') +
+                '</div>';
+        } catch (err) {
+            container.innerHTML = '<p class="text-danger">Failed to load departments</p>';
+        }
+    }
+
+    window.selectDept = function (id) {
+        if (bookingData.department_id !== id) { bookingData.doctor_id=null; bookingData.appointment_time=null; }
+        bookingData.department_id = id;
+        document.querySelectorAll('.dept-card').forEach(function (el) { el.classList.remove('selected'); });
+        event.currentTarget.classList.add('selected');
+    };
+
+    async function renderDoctors(container) {
+        container.innerHTML = '<div class="text-center py-4"><div class="spinner-border text-primary"></div></div>';
+        try {
+            doctors = await MV.api.get('/api/patient/doctors?department_id=' + bookingData.department_id);
+            container.innerHTML = '<h6 style="margin-bottom:16px">Select Doctor</h6>' +
+                '<div class="doctor-list">' +
+                  doctors.map(function (doc) {
+                      const sel = doc.doctor_id === bookingData.doctor_id ? 'selected' : '';
+                      const initials = MV.fmt.initials(doc.doctor_name);
+                      return '<div class="doctor-card ' + sel + '" onclick="selectDoctor(' + doc.doctor_id + ')">' +
+                          '<div class="doctor-avatar">' + initials + '</div>' +
+                          '<div class="doctor-info">' +
+                            '<h6>' + MV.esc(MV.fmt.docName(doc.doctor_name)) + '</h6>' +
+                            '<p>' + MV.esc(doc.specialization || 'General') + '</p>' +
+                          '</div>' +
+                        '</div>';
+                  }).join('') +
+                '</div>';
+        } catch (err) {
+            container.innerHTML = '<p class="text-danger">Failed to load doctors</p>';
+        }
+    }
+
+    window.selectDoctor = function (id) {
+        if (bookingData.doctor_id !== id) bookingData.appointment_time=null;
+        bookingData.doctor_id = id;
+        document.querySelectorAll('.doctor-card').forEach(function (el) { el.classList.remove('selected'); });
+        event.currentTarget.classList.add('selected');
+    };
+
+    function renderCalendar(container) {
+        const today = new Date();
+        const days = [];
+        for (let i = 0; i < 14; i++) {
+            const d = new Date(today);
+            d.setDate(today.getDate() + i);
+            days.push(d);
+        }
+
+        container.innerHTML = '<h6 style="margin-bottom:16px">Select Date</h6>' +
+            '<div class="calendar-grid">' +
+              days.map(function (d) {
+                  const dateStr = MV.fmt.isoDate(d);
+                  const sel = dateStr === bookingData.appointment_date ? 'selected' : '';
+                  return '<div class="calendar-day ' + sel + '" onclick="selectDate(\'' + dateStr + '\')">'
+                      + d.getDate() + '<small>' + d.toLocaleDateString('en-IN',{month:'short',weekday:'short'}) + '</small>' +
+                    '</div>';
+              }).join('') +
+            '</div>';
+    }
+
+    window.selectDate = function (date) {
+        if (bookingData.appointment_date !== date) bookingData.appointment_time=null;
+        bookingData.appointment_date = date;
+        document.querySelectorAll('.calendar-day').forEach(function (el) { el.classList.remove('selected'); });
+        event.currentTarget.classList.add('selected');
+    };
+
+    async function renderTimeSlots(container) {
+        container.innerHTML = '<div class="text-center py-4"><div class="spinner-border text-primary"></div></div>';
+        try {
+            availableSlots = await MV.api.get('/api/patient/available-slots?doctor_id=' + bookingData.doctor_id + '&appointment_date=' + bookingData.appointment_date);
+            if (!availableSlots.length) {
+                container.innerHTML = '<p class="text-muted">No slots available for this date</p>';
+                return;
+            }
+            container.innerHTML = '<h6 style="margin-bottom:16px">Select Time</h6>' +
+                '<div class="time-grid">' +
+                  availableSlots.map(function (time) {
+                      const sel = time === bookingData.appointment_time ? 'selected' : '';
+                      return '<div class="time-slot ' + sel + '" onclick="selectTime(\'' + time + '\')">'
+                          + MV.fmt.time12(time) +
+                        '</div>';
+                  }).join('') +
+                '</div>';
+        } catch (err) {
+            container.innerHTML = '<p class="text-danger">Failed to load slots</p>';
+        }
+    }
+
+    window.selectTime = function (time) {
+        bookingData.appointment_time = time;
+        document.querySelectorAll('.time-slot').forEach(function (el) { el.classList.remove('selected'); });
+        event.currentTarget.classList.add('selected');
+    };
+})();
+</script>
+</body>
+</html>

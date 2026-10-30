@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pharmacy · MediCare</title>
+
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link href="/assets/css/medivault-restyle.css" rel="stylesheet">
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<style>
+.pharmacy-grid {
+    display: grid; gap: 20px;
+    grid-template-columns: 1fr;
+}
+@media (min-width: 992px) {
+    .pharmacy-grid { grid-template-columns: 2fr 3fr; }
+}
+
+.pharmacy-grid .mv-card {
+    background: var(--mv-surface) !important;
+    border: 1px solid var(--mv-border) !important;
+    border-radius: var(--mv-radius-card, 10px) !important;
+    overflow: hidden !important;
+    box-shadow: var(--mv-shadow-sm) !important;
+}
+
+/* Prescription queue cards */
+.prescription-card {
+    padding: 16px 20px; border-bottom: 1px solid var(--mv-border);
+    display: flex; justify-content: space-between; align-items: center; gap: 12px;
+}
+.prescription-card:last-child { border-bottom: none; }
+.prescription-info { flex: 1; min-width: 0; }
+.prescription-info .name { font-weight: 600; margin-bottom: 4px; font-size: 14px; }
+.prescription-info .meta { font-size: 12px; color: var(--mv-text-muted); }
+
+/* Stock table */
+.stock-table { font-size: 13px; width: 100%; margin: 0; }
+.stock-table th { font-weight: 600; padding: 12px 16px; border-bottom: 1px solid var(--mv-border); background: var(--mv-surface); }
+.stock-table td { padding: 12px 16px; border-bottom: 1px solid var(--mv-border); vertical-align: middle; }
+.stock-table tbody tr:hover { background: var(--mv-surface-1); }
+.stock-low { color: var(--mv-danger); font-weight: 600; }
+.expiry-warn { color: var(--mv-warning); font-weight: 500; }
+
+/* Hero: dispense inline success with stock diff animation */
+.dispense-success {
+    background: rgba(22, 163, 74, 0.1);
+    border: 1px solid var(--mv-success);
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin: 16px 0;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.dispense-success i { color: var(--mv-success); font-size: 20px; }
+.dispense-success-body { flex: 1; }
+.dispense-success-title { font-weight: 600; font-size: 14px; margin: 0 0 4px; }
+.dispense-success-text { font-size: 12px; color: var(--mv-text-muted); margin: 0; }
+.stock-diff {
+    font-family: 'Poppins', sans-serif;
+    font-weight: 600;
+    color: var(--mv-success);
+}
+</style>
+<script src="/assets/js/theme-init.js"></script>
+<script src="/runtime-config.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+
+<div class="mv-layout" id="mvShell"></div>
+
+<!-- Dispense modal -->
+<div class="modal fade" id="dispenseModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Confirm dispensing</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="dispenseModalBody"></div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="mv-btn mv-btn-primary" id="confirmDispenseBtn">Confirm Dispense</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/mv-core.js"></script>
+<script src="/assets/js/mv-shell.js"></script>
+<script src="/assets/js/dispense-record.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    /* Pharmacy - HERO is dispense flow showing stock update animation */
+
+    let dispenseModalInstance;
+    let activeRx = null;
+
+    (async function init() {
+        const ctx = await MV.shell.mount({
+            roles: ['Admin', 'Pharmacist', 'Doctor', 'Nurse', 'Receptionist'],
+            title: 'Pharmacy',
+            subtitle: 'Manage Prescriptions'
+        });
+
+        ctx.actions.innerHTML =
+            '<button type="button" class="mv-btn mv-btn-outline" id="refreshBtn">' +
+              '<i class="fas fa-sync-alt"></i><span>Refresh</span>' +
+            '</button>';
+
+        ctx.content.innerHTML =
+            '<div id="successAlert"></div>' +
+            '<div class="pharmacy-grid">' +
+              '<div class="mv-card">' +
+                '<div class="mv-card-head">' +
+                  '<div class="d-flex align-items-center gap-2">' +
+                    '<i class="fa-solid fa-pills text-primary"></i>' +
+                    '<h2 style="margin:0;font-size:16px;font-weight:600">Pending Prescriptions</h2>' +
+                  '</div>' +
+                  '<span class="mv-badge is-warning"><i class="fa-solid fa-clock me-1"></i>Queue</span>' +
+                '</div>' +
+                '<div id="queueSlot"></div>' +
+              '</div>' +
+              '<div class="mv-card">' +
+                '<div class="mv-card-head">' +
+                  '<div class="d-flex align-items-center gap-2">' +
+                    '<i class="fa-solid fa-boxes-stacked text-primary"></i>' +
+                    '<h2 style="margin:0;font-size:16px;font-weight:600">Medicine Inventory</h2>' +
+                  '</div>' +
+                  '<input type="search" class="form-control form-control-sm" style="max-width:220px" id="invSearch" placeholder="Search medicines...">' +
+                '</div>' +
+                '<div class="mv-card-body" id="inventorySlot"></div>' +
+              '</div>' +
+            '</div>' +
+            '<div class="mv-footer">' +
+              'MediCare - Hospital Management System' +
+            '</div>';
+
+        document.getElementById('refreshBtn').addEventListener('click', function () {
+            loadQueue();
+            loadInventory();
+        });
+
+        document.getElementById('invSearch').addEventListener('input', MV.debounce(function () {
+            loadInventory(this.value.trim());
+        }, 300));
+
+        dispenseModalInstance = new bootstrap.Modal(document.getElementById('dispenseModal'));
+
+        loadQueue();
+        loadInventory();
+    })();
+
+    async function loadQueue() {
+        const slot = document.getElementById('queueSlot');
+        slot.innerHTML = Array(3).fill('').map(function () {
+            return '<div class="prescription-card">' +
+                '<div class="prescription-info">' +
+                  '<div class="mv-skeleton" style="width:160px;height:16px;margin-bottom:4px"></div>' +
+                  '<div class="mv-skeleton" style="width:120px;height:12px"></div>' +
+                '</div>' +
+                '<div class="mv-skeleton" style="width:90px;height:32px;border-radius:4px"></div>' +
+              '</div>';
+        }).join('');
+
+        try {
+            const rows = await MV.api.get('/api/staff/pharmacist/pending-prescriptions');
+            if (!rows.length) {
+                slot.innerHTML = '<div class="mv-empty">' +
+                    '<div class="mv-empty-icon"><i class="fas fa-check-circle"></i></div>' +
+                    '<p class="mv-empty-title">No pending prescriptions</p>' +
+                    '<p class="mv-empty-text">All prescriptions dispensed</p>' +
+                  '</div>';
+                return;
+            }
+
+            slot.innerHTML = rows.map(function (rx) {
+                const date = MV.fmt.dateIndian(rx.prescribed_date);
+                return '<div class="prescription-card">' +
+                    '<div class="prescription-info">' +
+                      '<div class="name">' + MV.esc(rx.patient_name) + '</div>' +
+                      '<div class="meta">' + MV.esc(MV.fmt.docName(rx.doctor_name)) + ' · ' + date + '</div>' +
+                    '</div>' +
+                    '<button type="button" class="mv-btn mv-btn-primary" data-rx-id="' + rx.prescription_id + '">' +
+                      '<i class="fas fa-check"></i><span>Dispense</span>' +
+                    '</button>' +
+                  '</div>';
+            }).join('');
+
+            slot.querySelectorAll('[data-rx-id]').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    const rxId = this.getAttribute('data-rx-id');
+                    const rx = rows.find(function (r) { return r.prescription_id == rxId; });
+                    openDispenseModal(rx);
+                });
+            });
+
+        } catch (err) {
+            slot.innerHTML = '<div class="mv-empty"><p class="mv-empty-text">Failed to load queue</p></div>';
+        }
+    }
+
+    async function loadInventory(search) {
+        const slot = document.getElementById('inventorySlot');
+        slot.innerHTML = '<div class="text-center py-4">' +
+            '<div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div>' +
+            '</div>';
+
+        try {
+            const rows = await MV.api.get('/api/staff/pharmacist/inventory' + (search ? '?q=' + encodeURIComponent(search) : ''));
+            if (!rows.length) {
+                slot.innerHTML = '<div class="mv-empty">' +
+                    '<div class="mv-empty-icon"><i class="fas fa-box"></i></div>' +
+                    '<p class="mv-empty-title">No medicines found</p>' +
+                  '</div>';
+                return;
+            }
+
+            const now = new Date();
+            const thirtyDays = 30 * 24 * 60 * 60 * 1000;
+
+            slot.innerHTML = '<div class="table-responsive"><table class="stock-table">' +
+                '<thead><tr>' +
+                  '<th>Medicine</th><th>Manufacturer</th><th>Stock</th><th>Price</th><th>Expiry</th>' +
+                '</tr></thead>' +
+                '<tbody>' +
+                  rows.map(function (m) {
+                      const low = m.stock_qty < 20;
+                      const exp = m.expiry_date ? new Date(m.expiry_date) : null;
+                      const expiring = exp && (exp - now) < thirtyDays && exp > now;
+                      const expired = exp && exp <= now;
+
+                      let expiryCell = exp ? MV.fmt.dateIndian(m.expiry_date) : '--';
+                      if (expired) expiryCell = '<span style="color:var(--mv-danger);font-weight:600">Expired</span>';
+                      else if (expiring) expiryCell = '<span class="expiry-warn">Expiring soon</span>';
+
+                      return '<tr>' +
+                          '<td>' + MV.esc(m.medicine_name) +
+                            (low ? ' <span class="mv-badge is-danger">Low</span>' : '') +
+                          '</td>' +
+                          '<td>' + MV.esc(m.manufacturer || '--') + '</td>' +
+                          '<td class="' + (low ? 'stock-low' : '') + '">' + m.stock_qty + '</td>' +
+                          '<td>₹' + MV.fmt.numberIndian(m.unit_price) + '</td>' +
+                          '<td>' + expiryCell + '</td>' +
+                        '</tr>';
+                  }).join('') +
+                '</tbody>' +
+              '</table></div>';
+
+        } catch (err) {
+            slot.innerHTML = '<div class="mv-empty"><p class="mv-empty-text">Failed to load inventory</p></div>';
+        }
+    }
+
+    async function openDispenseModal(rx) {
+        activeRx = rx;
+        const body = document.getElementById('dispenseModalBody');
+
+        body.innerHTML = '<div class="text-center py-3">' +
+            '<div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div>' +
+            '</div>';
+
+        dispenseModalInstance.show();
+        document.getElementById('confirmDispenseBtn').disabled = true;
+
+        try {
+            const items = await MV.api.get('/api/staff/pharmacist/prescription-items/' + rx.prescription_id);
+            if (!items.length) {
+                body.innerHTML = '<p class="text-muted mb-0">No items</p>';
+                return;
+            }
+
+            const preview = MV.dispenseRecord(rx, items);
+            body.innerHTML = preview.html;
+            document.getElementById('confirmDispenseBtn').disabled = !preview.canDispense;
+
+        } catch (err) {
+            body.innerHTML = '<p class="text-danger mb-0">Failed to load items</p>';
+        }
+    }
+
+    document.getElementById('confirmDispenseBtn').addEventListener('click', async function () {
+        const btn = this;
+        const restore = MV.pending(btn, 'Dispensing...');
+
+        try {
+            // HERO MOMENT: Fetch stock BEFORE to show diff
+            const items = await MV.api.get('/api/staff/pharmacist/prescription-items/' + activeRx.prescription_id);
+            const stockBefore = {};
+            items.forEach(function (it) {
+                stockBefore[it.medicine_id] = it.current_stock;
+            });
+
+            await MV.api.post('/api/staff/pharmacist/dispense/' + activeRx.prescription_id);
+
+            // Read actual post-trigger stock; never present guessed subtraction.
+            const stockAfter = await MV.api.get('/api/staff/pharmacist/prescription-items/' + activeRx.prescription_id);
+            const diffs = [...new Map(items.map(it=>[it.medicine_id,it])).values()].map(function (it) {
+                const before = stockBefore[it.medicine_id];
+                const after = stockAfter.find(row=>row.medicine_id===it.medicine_id).current_stock;
+                return '<span class="stock-diff">' + MV.esc(it.medicine_name) + ': ' + before + ' before · ' + after + ' remaining</span>';
+            }).join('<br>');
+
+            const alert = document.getElementById('successAlert');
+            alert.innerHTML = '<div class="dispense-success">' +
+                '<i class="fas fa-check-circle"></i>' +
+                '<div class="dispense-success-body">' +
+                  '<p class="dispense-success-title">Prescription dispensed ✓</p>' +
+                  '<p class="dispense-success-text">' + diffs + '</p>' +
+                '</div>' +
+              '</div>';
+
+            // Auto-hide after 8 seconds
+            setTimeout(function () {
+                alert.innerHTML = '';
+            }, 8000);
+
+            dispenseModalInstance.hide();
+            loadQueue();
+            loadInventory();
+
+        } catch (err) {
+            MV.toast.error('Dispense failed', err.message);
+        } finally {
+            restore();
+        }
+    });
+})();
+</script>
+</body>
+</html>

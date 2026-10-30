@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Staff Portal - MediCare</title>
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<script src="/assets/js/theme-init.js"></script>
+</head>
+<body class="bg-light">
+<nav class="navbar navbar-dark bg-dark px-3 d-flex justify-content-between">
+    <span class="navbar-brand" id="navTitle">🏥 MediCare - Staff</span>
+    <button class="btn btn-outline-light btn-sm" onclick="logout()">Logout</button>
+</nav>
+<div class="container py-4" id="app"></div>
+<script>
+const app = document.getElementById('app');
+
+async function init() {
+    const me = await (await fetch('/api/auth/me')).json();
+    if (!me.role) { window.location.href = '/login.html'; return; }
+    document.getElementById('navTitle').textContent = `🏥 MediVault - ${me.role}`;
+    if (me.role === 'Nurse') renderNurse();
+    else if (me.role === 'Lab Technician') renderLabTech();
+    else if (me.role === 'Pharmacist') renderPharmacist();
+    else if (me.role === 'Receptionist') renderReceptionist();
+}
+
+async function renderNurse() {
+    const rows = await (await fetch('/api/staff/nurse/beds')).json();
+    app.innerHTML = `<div class="card"><div class="card-header">Bed Occupancy by Ward</div>
+        <table class="table mb-0"><thead><tr><th>Ward</th><th>Occupied</th><th>Total</th><th>%</th></tr></thead>
+        <tbody>${rows.map(r => `<tr><td>${r.ward_name}</td><td>${r.occupied}</td><td>${r.total_beds}</td><td>${r.occupancy_pct}%</td></tr>`).join('')}</tbody></table></div>`;
+}
+
+async function renderLabTech() {
+    const rows = await (await fetch('/api/staff/lab-tech/pending-requests')).json();
+    app.innerHTML = `<div class="card"><div class="card-header">Pending Test Requests</div>
+        <table class="table mb-0"><thead><tr><th>Test</th><th>Patient</th><th>Requested By</th><th></th></tr></thead>
+        <tbody>${rows.map(r => `<tr><td>${r.test_name}</td><td>${r.patient_name}</td><td>${r.requested_by}</td>
+            <td><button class="btn btn-sm btn-primary" onclick="submitReport(${r.request_id})">Enter Result</button></td></tr>`).join('')}</tbody></table></div>`;
+}
+async function submitReport(requestId) {
+    const result_summary = prompt('Result summary:');
+    if (!result_summary) return;
+    const res = await fetch(`/api/staff/lab-tech/requests/${requestId}/report`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ result_summary })
+    });
+    alert(res.ok ? 'Report generated' : (await res.json()).error);
+    if (res.ok) renderLabTech();
+}
+
+async function renderPharmacist() {
+    const rows = await (await fetch('/api/staff/pharmacist/pending-prescriptions')).json();
+    app.innerHTML = `<div class="card"><div class="card-header">Pending Prescriptions</div>
+        <table class="table mb-0"><thead><tr><th>Patient</th><th>Doctor</th><th>Date</th><th></th></tr></thead>
+        <tbody>${rows.map(r => `<tr><td>${r.patient_name}</td><td>${r.doctor_name}</td><td>${r.prescribed_date}</td>
+            <td><button class="btn btn-sm btn-success" onclick="dispense(${r.prescription_id})">Dispense</button></td></tr>`).join('')}</tbody></table></div>`;
+}
+async function dispense(prescriptionId) {
+    const res = await fetch(`/api/staff/pharmacist/dispense/${prescriptionId}`, { method: 'POST' });
+    const data = await res.json();
+    alert(res.ok ? data.message + ' (stock auto-updated by trg_update_stock)' : data.error);
+    if (res.ok) renderPharmacist();
+}
+
+async function renderReceptionist() {
+    app.innerHTML = `<div class="row g-3">
+        <div class="col-md-4"><div class="card"><div class="card-header">Register Patient</div>
+            <div class="card-body"><p class="small text-muted">POSTs to /api/staff/receptionist/register-patient</p></div></div></div>
+        <div class="col-md-4"><div class="card"><div class="card-header">Book Appointment</div>
+            <div class="card-body"><p class="small text-muted">POSTs to /api/staff/receptionist/book-appointment (calls sp_book_appointment)</p></div></div></div>
+        <div class="col-md-4"><div class="card"><div class="card-header">Generate Bill</div>
+            <div class="card-body"><p class="small text-muted">POSTs to /api/staff/receptionist/generate-bill (calls sp_generate_bill)</p></div></div></div>
+    </div>`;
+}
+async function logout() {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    window.location.href = '/login.html';
+}
+init();
+</script>
+</body>
+</html>

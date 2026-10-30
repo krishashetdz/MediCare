@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Billing · MediCare</title>
+
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link href="/assets/css/medivault-restyle.css" rel="stylesheet">
+<style>
+/* HERO: Printable invoice with hospital letterhead */
+.invoice-container {
+    max-width: 800px; margin: 0 auto;
+    background: white;
+    padding: 40px;
+    border: 1px solid var(--mv-border);
+    border-radius: var(--mv-radius-card);
+}
+
+.invoice-letterhead {
+    text-align: center;
+    border-bottom: 3px solid var(--mv-primary);
+    padding-bottom: 24px;
+    margin-bottom: 32px;
+    position: relative;
+}
+
+.invoice-letterhead h1 {
+    font-family: 'Poppins', sans-serif;
+    font-size: 32px;
+    font-weight: 700;
+    color: var(--mv-primary);
+    margin: 0 0 8px;
+}
+
+.invoice-letterhead .tagline {
+    font-size: 13px;
+    color: var(--mv-text-muted);
+    margin: 0;
+}
+
+.invoice-letterhead .address {
+    font-size: 12px;
+    color: var(--mv-text-muted);
+    margin: 8px 0 0;
+}
+
+.paid-stamp {
+    position: absolute;
+    top: 50%;
+    right: 20px;
+    transform: translateY(-50%) rotate(-15deg);
+    border: 4px solid var(--mv-success);
+    color: var(--mv-success);
+    padding: 8px 24px;
+    border-radius: 8px;
+    font-size: 28px;
+    font-weight: 700;
+    font-family: 'Poppins', sans-serif;
+    opacity: 0.7;
+}
+
+.invoice-meta {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    margin-bottom: 32px;
+}
+
+.invoice-meta-item strong {
+    display: block;
+    font-size: 11px;
+    text-transform: uppercase;
+    color: var(--mv-text-muted);
+    margin-bottom: 4px;
+    letter-spacing: 0.5px;
+}
+
+.invoice-meta-item p {
+    margin: 0;
+    font-weight: 600;
+    font-size: 15px;
+}
+
+.items-table {
+    width: 100%;
+    margin-bottom: 32px;
+    border-collapse: collapse;
+}
+
+.items-table th {
+    text-align: left;
+    padding: 12px;
+    background: var(--mv-bg);
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    border-bottom: 2px solid var(--mv-border);
+}
+
+.items-table td {
+    padding: 12px;
+    border-bottom: 1px solid var(--mv-border);
+    font-size: 14px;
+}
+
+.items-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.items-table .amount {
+    text-align: right;
+    font-weight: 600;
+    font-family: 'Poppins', sans-serif;
+}
+
+.invoice-total {
+    text-align: right;
+    margin-bottom: 32px;
+}
+
+.invoice-total-line {
+    display: flex;
+    justify-content: flex-end;
+    gap: 80px;
+    padding: 8px 0;
+    font-size: 14px;
+}
+
+.invoice-total-line.grand {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--mv-primary);
+    border-top: 2px solid var(--mv-border);
+    padding-top: 16px;
+    margin-top: 16px;
+    font-family: 'Poppins', sans-serif;
+}
+
+.invoice-footer {
+    text-align: center;
+    font-size: 11px;
+    color: var(--mv-text-muted);
+    border-top: 1px solid var(--mv-border);
+    padding-top: 16px;
+}
+
+/* Print styles */
+@media print {
+    @page { margin: 14mm; }
+    body { background: white; }
+    .mv-sidebar, .mv-topbar, .mv-footer, .mv-btn { display: none !important; }
+    .mv-main { margin-left: 0 !important; }
+    .mv-page { padding: 0 !important; }
+    .invoice-container {
+        border: none;
+        box-shadow: none;
+        padding: 0;
+        max-width: 100%;
+    }
+}
+</style>
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<script src="/assets/js/theme-init.js"></script>
+<script src="/runtime-config.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+
+<div class="mv-layout" id="mvShell"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/mv-core.js"></script>
+<script src="/assets/js/mv-shell.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    /* Billing - HERO is printable invoice with letterhead */
+
+    const params = new URLSearchParams(location.search);
+    const billId = params.get('id');
+
+    (async function init() {
+        const ctx = await MV.shell.mount({
+            roles: ['Admin', 'Receptionist', 'Doctor', 'Patient'],
+            title: 'Billing',
+            subtitle: 'Invoice'
+        });
+
+        if (!billId) {
+            ctx.content.innerHTML =
+                '<div class="mv-card">' +
+                  '<div class="mv-card-head">' +
+                    '<div class="d-flex align-items-center gap-2">' +
+                      '<i class="fa-solid fa-file-invoice-dollar text-primary fs-5"></i>' +
+                      '<h2 style="margin:0;font-size:16px;font-weight:600">Hospital Invoices</h2>' +
+                    '</div>' +
+                    '<span class="mv-badge is-primary">All Invoices</span>' +
+                  '</div>' +
+                  '<div class="mv-card-body p-0" id="billListSlot"></div>' +
+                '</div>';
+            loadBillList();
+            return;
+        }
+
+        ctx.actions.innerHTML =
+            '<button type="button" class="mv-btn mv-btn-primary" id="printBtn">' +
+              '<i class="fas fa-print"></i><span>Print Invoice</span>' +
+            '</button>' +
+            '<button type="button" class="mv-btn mv-btn-outline" id="backBtn">' +
+              '<i class="fas fa-arrow-left"></i><span>Back</span>' +
+            '</button>';
+
+        document.getElementById('printBtn').addEventListener('click', function () { window.print(); });
+        document.getElementById('backBtn').addEventListener('click', function () { history.back(); });
+
+        ctx.content.innerHTML = '<div class="invoice-container"><div class="text-center py-5">' +
+            '<div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div>' +
+            '</div></div>' +
+            '<div class="mv-footer">' +
+              'MediCare - Hospital Management System' +
+            '</div>';
+
+        loadBill(ctx.content);
+    })();
+
+    async function loadBillList() {
+        const slot = document.getElementById('billListSlot');
+        if (!slot) return;
+        slot.innerHTML = '<div class="text-center py-5"><div class="spinner-border text-primary" role="status"></div></div>';
+        try {
+            const bills = await MV.api.get('/api/billing');
+            if (!bills.length) {
+                slot.innerHTML = '<div class="mv-empty"><div class="mv-empty-icon"><i class="fas fa-file-invoice"></i></div><p class="mv-empty-title">No bills found</p></div>';
+                return;
+            }
+            slot.innerHTML = MV.table({
+                columns: ['Bill #', 'Patient', 'Date', 'Amount', 'Status', 'Action'],
+                rows: bills.map(function (b) {
+                    const statusBadge = b.payment_status === 'Paid'
+                        ? '<span class="mv-badge mv-badge-success"><i class="fa-solid fa-check me-1"></i>Paid</span>'
+                        : '<span class="mv-badge mv-badge-warning"><i class="fa-solid fa-clock me-1"></i>Pending</span>';
+                    return [
+                        '#' + b.bill_id,
+                        MV.esc(b.patient_name || ('Patient #' + b.patient_id)),
+                        MV.fmt.dateIndian(b.bill_date),
+                        '<strong>₹' + Number(b.total_amount).toFixed(2) + '</strong>',
+                        statusBadge,
+                        '<a href="/billing.html?id=' + b.bill_id + '" class="mv-btn mv-btn-sm mv-btn-outline"><i class="fa-solid fa-eye me-1"></i>View Invoice</a>'
+                    ];
+                })
+            });
+        } catch (err) {
+            slot.innerHTML = '<div class="p-4 text-danger">Failed to load bills: ' + MV.esc(err.message) + '</div>';
+        }
+    }
+
+    async function loadBill(container) {
+        try {
+            const bill = await MV.api.get('/api/billing/' + billId);
+            const items = await MV.api.get('/api/billing/' + billId + '/items');
+
+            const isPaid = bill.payment_status === 'Paid';
+            const billDate = MV.fmt.dateIndian(bill.bill_date);
+
+            let html = '<div class="invoice-container">' +
+                '<div class="invoice-letterhead">' +
+                  '<h1>MediCare Hospital</h1>' +
+                  '<p class="tagline">Patient invoice · All amounts in Indian rupees</p>' +
+                  (isPaid ? '<div class="paid-stamp">PAID</div>' : '') +
+                '</div>' +
+
+                '<div class="invoice-meta">' +
+                  '<div class="invoice-meta-item">' +
+                    '<strong>Invoice Number</strong>' +
+                    '<p>INV-' + String(bill.bill_id).padStart(6, '0') + '</p>' +
+                  '</div>' +
+                  '<div class="invoice-meta-item">' +
+                    '<strong>Date</strong>' +
+                    '<p>' + billDate + '</p>' +
+                  '</div>' +
+                  '<div class="invoice-meta-item">' +
+                    '<strong>Patient Name</strong>' +
+                    '<p>' + MV.esc(bill.patient_name) + '</p>' +
+                  '</div>' +
+                  '<div class="invoice-meta-item">' +
+                    '<strong>Payment Status</strong>' +
+                    '<p>' + bill.payment_status + '</p>' +
+                  '</div>' +
+                '</div>';
+
+            if (bill.appointment_id) {
+                html += '<div style="margin-bottom:24px;font-size:13px">' +
+                    '<strong>Appointment Reference:</strong> #' + bill.appointment_id +
+                    '</div>';
+            }
+
+            html += '<table class="items-table">' +
+                '<thead><tr>' +
+                  '<th>Description</th><th>Type</th><th class="amount">Amount</th>' +
+                '</tr></thead>' +
+                '<tbody>';
+
+            items.forEach(function (it) {
+                html += '<tr>' +
+                    '<td>' + MV.esc(it.description || '--') + '</td>' +
+                    '<td>' + it.item_type + '</td>' +
+                    '<td class="amount">₹' + MV.fmt.numberIndian(it.amount) + '</td>' +
+                  '</tr>';
+            });
+
+            html += '</tbody></table>';
+
+            html += '<div class="invoice-total">' +
+                '<div class="invoice-total-line grand">' +
+                  '<span>Total Amount</span>' +
+                  '<span>₹' + MV.fmt.numberIndian(bill.total_amount) + '</span>' +
+                '</div>' +
+              '</div>';
+
+            html += '<div class="invoice-footer">' +
+                '<p>This is a computer-generated invoice. No signature required.</p>' +
+                '<p>Generated on ' + billDate + ' by MediCare Hospital Management System</p>' +
+              '</div>';
+
+            html += '</div>';
+
+            container.innerHTML = html + '<div class="mv-footer">' +
+              'MediCare - Hospital Management System' +
+            '</div>';
+
+        } catch (err) {
+            container.innerHTML = '<div class="invoice-container">' +
+                '<div class="mv-empty"><p class="mv-empty-text">Failed to load bill</p></div>' +
+                '</div>';
+        }
+    }
+})();
+</script>
+</body>
+</html>

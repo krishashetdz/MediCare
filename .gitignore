@@ -1,0 +1,27 @@
+# Environment files
+.env
+.env.local
+.env.*.local
+*.env
+
+# Dependencies
+node_modules/
+**/node_modules/
+.ruff_cache/
+**/.ruff_cache/
+
+# Archives & Temporary Scratch
+project_backup.zip
+*.zip
+scratch_disk.txt
+scratch_zip.txt
+.system_generated/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+

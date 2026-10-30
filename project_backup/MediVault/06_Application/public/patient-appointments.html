@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My Appointments · MediCare</title>
+
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link href="/assets/css/medivault-restyle.css" rel="stylesheet">
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<style>
+.wizard-progress { display: flex; justify-content: space-between; margin-bottom: 28px; position: relative; }
+.wizard-progress::before { content: ''; position: absolute; top: 18px; left: 10%; right: 10%; height: 2px; background: var(--mv-border); z-index: 0; }
+.wizard-step { display: flex; flex-direction: column; align-items: center; position: relative; z-index: 1; flex: 1; }
+.wizard-step-num { width: 36px; height: 36px; border-radius: 50%; background: var(--mv-bg); border: 2px solid var(--mv-border); display: flex; align-items: center; justify-content: center; font-weight: 700; color: var(--mv-text-muted); font-size: 13px; }
+.wizard-step.active .wizard-step-num { background: var(--mv-primary); border-color: var(--mv-primary); color: var(--mv-action-ink); }
+.wizard-step.completed .wizard-step-num { background: var(--mv-success); border-color: var(--mv-success); color: white; }
+.wizard-step-label { font-size: 11px; margin-top: 6px; color: var(--mv-text-muted); text-align: center; }
+.wizard-step.active .wizard-step-label { color: var(--mv-text); font-weight: 600; }
+.wizard-content { min-height: 260px; }
+.dept-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+.dept-card { padding: 18px 12px; background: var(--mv-surface); border-radius: 4px; border: 1px solid var(--mv-border); cursor: pointer; text-align: center; transition: all 0.15s; }
+.dept-card:hover { border-color: var(--mv-text); background: var(--mv-surface-1); }
+.dept-card.selected { border-color: var(--mv-primary); background: var(--mv-surface-2); font-weight: 600; }
+.doctor-list { display: grid; gap: 10px; }
+.doctor-card { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: var(--mv-surface); border-radius: 4px; border: 1px solid var(--mv-border); cursor: pointer; transition: all 0.15s; }
+.doctor-card:hover { border-color: var(--mv-text); background: var(--mv-surface-1); }
+.doctor-card.selected { border-color: var(--mv-primary); background: var(--mv-surface-2); font-weight: 600; }
+.doctor-avatar { width: 40px; height: 40px; border-radius: 4px; background: var(--mv-surface-2); border: 1px solid var(--mv-border); display: flex; align-items: center; justify-content: center; color: var(--mv-text); font-weight: 600; font-size: 13px; }
+.calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+.calendar-day { padding: 10px 4px; display: flex; flex-direction: column; align-items: center; justify-content: center; border-radius: 4px; border: 1px solid var(--mv-border); cursor: pointer; font-size: 14px; font-weight: 600; text-align: center; }
+.calendar-day small { font-size: 10px; color: var(--mv-text-muted); font-weight: normal; }
+.calendar-day:hover { border-color: var(--mv-text); background: var(--mv-surface-1); }
+.calendar-day.selected { background: var(--mv-primary); color: var(--mv-action-ink); border-color: var(--mv-primary); }
+.calendar-day.selected small { color: var(--mv-action-ink); }
+.time-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px; }
+.time-slot { padding: 10px 6px; border-radius: 4px; border: 1px solid var(--mv-border); text-align: center; cursor: pointer; font-weight: 500; font-size: 13px; }
+.time-slot:hover { border-color: var(--mv-text); background: var(--mv-surface-1); }
+.time-slot.selected { background: var(--mv-primary); color: var(--mv-action-ink); border-color: var(--mv-primary); }
+.appt-card { padding: 20px; border: 1px solid var(--mv-border); background: var(--mv-surface); border-radius: 4px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+.appt-meta h5 { margin: 0 0 6px; font-size: 16px; font-weight: 600; color: var(--mv-text); }
+.appt-meta p { margin: 0; font-size: 13px; color: var(--mv-text-muted); }
+.appt-time { font-size: 14px; font-weight: 600; color: var(--mv-text); display: flex; align-items: center; gap: 8px; }
+.appt-actions { display: flex; align-items: center; gap: 10px; }
+</style>
+<script src="/assets/js/theme-init.js"></script>
+<script src="/runtime-config.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+
+<div class="mv-layout" id="mvShell"></div>
+
+<!-- Booking modal -->
+<div class="modal fade" id="bookingModal" tabindex="-1" data-bs-backdrop="static">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Book New Appointment</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="wizard-progress" id="wizardProgress"></div>
+                <div class="wizard-content" id="wizardContent"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="mv-btn mv-btn-outline" id="wizardBack" style="display:none">Back</button>
+                <button type="button" class="mv-btn mv-btn-primary" id="wizardNext">Next</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/mv-core.js"></script>
+<script src="/assets/js/mv-shell.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    let allAppointments = [];
+    let wizardStep = 0;
+    let bookingData = { department_id: null, doctor_id: null, appointment_date: null, appointment_time: null };
+    let departments = [];
+    let doctors = [];
+    let availableSlots = [];
+    let modalInst;
+
+    (async function init() {
+        const ctx = await MV.shell.mount({
+            roles: ['Patient'],
+            title: 'Appointments',
+            subtitle: 'Book and track your doctor appointments'
+        });
+
+        modalInst = new bootstrap.Modal(document.getElementById('bookingModal'));
+
+        ctx.actions.innerHTML =
+            '<button type="button" class="mv-btn mv-btn-primary" id="bookNewBtn">' +
+              '<i class="fas fa-calendar-plus"></i><span>Book Appointment</span>' +
+            '</button>';
+
+        document.getElementById('bookNewBtn').addEventListener('click', showBookingWizard);
+
+        ctx.content.innerHTML =
+            '<div class="row g-3 mb-4">' +
+              '<div class="col-md-4">' +
+                '<div class="mv-stat">' +
+                  '<div class="mv-stat-label">Upcoming Appointments</div>' +
+                  '<div class="mv-stat-value" id="statUpcoming">--</div>' +
+                '</div>' +
+              '</div>' +
+              '<div class="col-md-4">' +
+                '<div class="mv-stat">' +
+                  '<div class="mv-stat-label">Completed Consultations</div>' +
+                  '<div class="mv-stat-value" id="statCompleted">--</div>' +
+                '</div>' +
+              '</div>' +
+              '<div class="col-md-4">' +
+                '<div class="mv-stat">' +
+                  '<div class="mv-stat-label">Total Bookings</div>' +
+                  '<div class="mv-stat-value" id="statTotal">--</div>' +
+                '</div>' +
+              '</div>' +
+            '</div>' +
+
+            '<div class="mv-card">' +
+              '<div class="mv-card-head">' +
+                '<h2>Upcoming Appointments</h2>' +
+                '<span class="mv-badge is-neutral" id="upcomingBadge">0 scheduled</span>' +
+              '</div>' +
+              '<div class="mv-card-body" id="upcomingContainer"></div>' +
+            '</div>' +
+
+            '<div class="mv-card">' +
+              '<div class="mv-card-head">' +
+                '<h2>Past Appointments & History</h2>' +
+              '</div>' +
+              '<div class="mv-card-body" id="pastContainer"></div>' +
+            '</div>' +
+
+            '<div class="mv-footer">' +
+              'MediCare - Hospital Management System' +
+            '</div>';
+
+        document.getElementById('wizardBack').addEventListener('click', function () {
+            if (wizardStep > 0) { wizardStep--; renderWizardStep(); }
+        });
+        document.getElementById('wizardNext').addEventListener('click', handleWizardNext);
+
+        loadAppointments();
+    })();
+
+    async function loadAppointments() {
+        const upcomingEl = document.getElementById('upcomingContainer');
+        const pastEl = document.getElementById('pastContainer');
+        upcomingEl.innerHTML = '<div class="text-center py-4"><div class="spinner-border spinner-border-sm"></div> Loading appointments...</div>';
+
+        try {
+            allAppointments = await MV.api.get('/api/patient/appointments');
+            const today = new Date().toISOString().slice(0, 10);
+
+            const upcoming = allAppointments.filter(function (a) {
+                return (a.status === 'Scheduled' || a.status === 'Confirmed') && a.appointment_date >= today;
+            });
+            const past = allAppointments.filter(function (a) {
+                return a.status === 'Completed' || a.status === 'Cancelled' || a.appointment_date < today;
+            });
+
+            document.getElementById('statUpcoming').textContent = upcoming.length;
+            document.getElementById('statCompleted').textContent = allAppointments.filter(a => a.status === 'Completed').length;
+            document.getElementById('statTotal').textContent = allAppointments.length;
+            document.getElementById('upcomingBadge').textContent = upcoming.length + ' scheduled';
+
+            if (!upcoming.length) {
+                upcomingEl.innerHTML =
+                    '<div class="mv-empty py-4 text-center">' +
+                      '<p class="mv-empty-title">No upcoming appointments</p>' +
+                      '<p class="mv-empty-text text-muted mb-3">You do not have any pending or confirmed appointments.</p>' +
+                      '<button type="button" class="mv-btn mv-btn-primary mv-btn-sm" onclick="showBookingWizard()">' +
+                        '<i class="fas fa-calendar-plus"></i><span>Book Appointment</span>' +
+                      '</button>' +
+                    '</div>';
+            } else {
+                upcomingEl.innerHTML = upcoming.map(renderAppointmentCard).join('');
+            }
+
+            if (!past.length) {
+                pastEl.innerHTML = '<p class="text-muted p-3 mb-0">No past appointment history.</p>';
+            } else {
+                pastEl.innerHTML = past.map(renderAppointmentCard).join('');
+            }
+        } catch (err) {
+            upcomingEl.innerHTML = '<p class="text-danger p-3">Failed to load appointments: ' + MV.esc(err.message) + '</p>';
+        }
+    }
+
+    function renderAppointmentCard(appt) {
+        let statusBadge = '';
+        if (appt.status === 'Confirmed') {
+            statusBadge = '<span class="mv-badge is-success"><i class="fas fa-check-circle"></i> Confirmed by Doctor</span>';
+        } else if (appt.status === 'Scheduled') {
+            statusBadge = '<span class="mv-badge is-warning"><i class="fas fa-clock"></i> Scheduled (Pending Doctor)</span>';
+        } else if (appt.status === 'Completed') {
+            statusBadge = '<span class="mv-badge is-neutral"><i class="fas fa-check"></i> Completed</span>';
+        } else if (appt.status === 'Cancelled') {
+            statusBadge = '<span class="mv-badge is-danger"><i class="fas fa-times-circle"></i> Cancelled</span>';
+        }
+
+        const canCancel = appt.status === 'Scheduled' || appt.status === 'Confirmed';
+        const isCompleted = appt.status === 'Completed';
+
+        const docDisplayName = (appt.doctor_name || '').startsWith('Dr.') ? appt.doctor_name : ('Dr. ' + (appt.doctor_name || ''));
+
+        return '' +
+        '<div class="appt-card">' +
+          '<div class="appt-meta">' +
+            '<h5>' + MV.esc(docDisplayName) + ' <span class="text-muted fw-normal">(' + MV.esc(appt.specialization || 'Specialist') + ')</span></h5>' +
+            '<p><i class="fas fa-hospital me-1"></i> ' + MV.esc(appt.department_name) + ' &bull; Booked on ' + MV.fmt.date(appt.created_at) + '</p>' +
+          '</div>' +
+          '<div>' +
+            '<div class="appt-time">' +
+              '<i class="fas fa-calendar-alt text-muted"></i> ' + MV.fmt.dateIndian(appt.appointment_date) + ' &nbsp;&bull;&nbsp; ' +
+              '<i class="fas fa-clock text-muted"></i> ' + MV.fmt.time12(appt.appointment_time) +
+            '</div>' +
+            '<div class="mt-2">' + statusBadge + '</div>' +
+          '</div>' +
+          '<div class="appt-actions">' +
+            (canCancel ? '<button type="button" class="mv-btn mv-btn-outline mv-btn-sm text-danger" onclick="cancelAppt(' + appt.appointment_id + ')"><i class="fas fa-times"></i> Cancel</button>' : '') +
+            (isCompleted ? '<a href="/patient-reports.html" class="mv-btn mv-btn-outline mv-btn-sm"><i class="fas fa-file-medical"></i> View Report</a>' : '') +
+          '</div>' +
+        '</div>';
+    }
+
+    window.cancelAppt = async function (id) {
+        if (!confirm('Are you sure you want to cancel this appointment?')) return;
+        try {
+            await MV.api.post('/api/patient/appointments/' + id + '/cancel', {});
+            MV.toast.success('Appointment cancelled');
+            loadAppointments();
+        } catch (err) {
+            MV.toast.error('Cancel failed', err.message);
+        }
+    };
+
+    window.showBookingWizard = function () {
+        wizardStep = 0;
+        bookingData = { department_id: null, doctor_id: null, appointment_date: null, appointment_time: null };
+        modalInst.show();
+        renderWizardStep();
+    };
+
+    async function handleWizardNext() {
+        if (wizardStep === 0 && !bookingData.department_id) return MV.toast.warn('Please select a department');
+        if (wizardStep === 1 && !bookingData.doctor_id) return MV.toast.warn('Please select a doctor');
+        if (wizardStep === 2 && !bookingData.appointment_date) return MV.toast.warn('Please select an appointment date');
+        if (wizardStep === 3 && !bookingData.appointment_time) return MV.toast.warn('Please select a time slot');
+
+        if (wizardStep === 3) {
+            const nextBtn = document.getElementById('wizardNext');
+            const restore = MV.pending(nextBtn, 'Booking appointment…');
+            try {
+                await MV.api.post('/api/patient/book-appointment', bookingData);
+                MV.toast.success('Appointment booked successfully!');
+                modalInst.hide();
+                loadAppointments();
+            } catch (err) {
+                MV.toast.error('Booking failed', err.message);
+            } finally {
+                restore();
+            }
+            return;
+        }
+
+        wizardStep++;
+        await renderWizardStep();
+    }
+
+    async function renderWizardStep() {
+        const progress = document.getElementById('wizardProgress');
+        const content = document.getElementById('wizardContent');
+        const backBtn = document.getElementById('wizardBack');
+        const nextBtn = document.getElementById('wizardNext');
+
+        backBtn.style.display = wizardStep > 0 ? 'inline-block' : 'none';
+        nextBtn.textContent = wizardStep === 3 ? 'Confirm & Book' : 'Next';
+
+        const steps = ['Department', 'Doctor', 'Date', 'Time'];
+        progress.innerHTML = steps.map(function (label, i) {
+            const state = i < wizardStep ? 'completed' : i === wizardStep ? 'active' : '';
+            return '<div class="wizard-step ' + state + '">' +
+                '<div class="wizard-step-num">' + (i + 1) + '</div>' +
+                '<div class="wizard-step-label">' + label + '</div>' +
+              '</div>';
+        }).join('');
+
+        if (wizardStep === 0) await renderDepartments(content);
+        else if (wizardStep === 1) await renderDoctors(content);
+        else if (wizardStep === 2) renderCalendar(content);
+        else if (wizardStep === 3) await renderTimeSlots(content);
+    }
+
+    async function renderDepartments(container) {
+        container.innerHTML = '<div class="text-center py-4"><div class="spinner-border spinner-border-sm"></div></div>';
+        try {
+            departments = await MV.api.get('/api/patient/departments');
+            container.innerHTML = '<h6 class="mb-3">1. Select Medical Department</h6>' +
+                '<div class="dept-grid">' +
+                  departments.map(function (d) {
+                      const sel = d.department_id === bookingData.department_id ? 'selected' : '';
+                      return '<div class="dept-card ' + sel + '" onclick="selectDept(' + d.department_id + ')">' +
+                          '<i class="fas fa-hospital mb-2" style="font-size:22px;color:var(--mv-text)"></i>' +
+                          '<div class="small fw-semibold">' + MV.esc(d.department_name) + '</div>' +
+                        '</div>';
+                  }).join('') +
+                '</div>';
+        } catch (err) {
+            container.innerHTML = '<p class="text-danger">Failed to load departments</p>';
+        }
+    }
+
+    window.selectDept = function (id) {
+        if (bookingData.department_id !== id) { bookingData.doctor_id = null; bookingData.appointment_time = null; }
+        bookingData.department_id = id;
+        document.querySelectorAll('.dept-card').forEach(el => el.classList.remove('selected'));
+        event.currentTarget.classList.add('selected');
+    };
+
+    async function renderDoctors(container) {
+        container.innerHTML = '<div class="text-center py-4"><div class="spinner-border spinner-border-sm"></div></div>';
+        try {
+            doctors = await MV.api.get('/api/patient/doctors?department_id=' + bookingData.department_id);
+            if (!doctors.length) {
+                container.innerHTML = '<p class="text-muted py-4 text-center">No doctors available in this department.</p>';
+                return;
+            }
+            container.innerHTML = '<h6 class="mb-3">2. Select Doctor</h6>' +
+                '<div class="doctor-list">' +
+                  doctors.map(function (doc) {
+                      const sel = doc.doctor_id === bookingData.doctor_id ? 'selected' : '';
+                      const initials = MV.fmt.initials(doc.doctor_name);
+                      return '<div class="doctor-card ' + sel + '" onclick="selectDoctor(' + doc.doctor_id + ')">' +
+                          '<div class="doctor-avatar">' + initials + '</div>' +
+                          '<div class="flex-grow-1">' +
+                            '<h6 class="mb-0">' + MV.esc(MV.fmt.docName(doc.doctor_name)) + '</h6>' +
+                            '<small class="text-muted">' + MV.esc(doc.specialization || 'General') + '</small>' +
+                          '</div>' +
+                        '</div>';
+                  }).join('') +
+                '</div>';
+        } catch (err) {
+            container.innerHTML = '<p class="text-danger">Failed to load doctors</p>';
+        }
+    }
+
+    window.selectDoctor = function (id) {
+        if (bookingData.doctor_id !== id) bookingData.appointment_time = null;
+        bookingData.doctor_id = id;
+        document.querySelectorAll('.doctor-card').forEach(el => el.classList.remove('selected'));
+        event.currentTarget.classList.add('selected');
+    };
+
+    function renderCalendar(container) {
+        const days = [];
+        const start = new Date();
+        for (let i = 0; i < 14; i++) {
+            const d = new Date(start);
+            d.setDate(d.getDate() + i);
+            days.push(d);
+        }
+
+        container.innerHTML = '<h6 class="mb-3">3. Choose Appointment Date</h6>' +
+            '<div class="calendar-grid">' +
+              days.map(function (d) {
+                  const iso = d.toISOString().slice(0, 10);
+                  const sel = iso === bookingData.appointment_date ? 'selected' : '';
+                  return '<div class="calendar-day ' + sel + '" onclick="selectDate(\'' + iso + '\')">' +
+                      '<span>' + d.getDate() + '</span>' +
+                      '<small>' + d.toLocaleDateString('en-IN', { month: 'short', weekday: 'short' }) + '</small>' +
+                    '</div>';
+              }).join('') +
+            '</div>';
+    }
+
+    window.selectDate = function (date) {
+        if (bookingData.appointment_date !== date) bookingData.appointment_time = null;
+        bookingData.appointment_date = date;
+        document.querySelectorAll('.calendar-day').forEach(el => el.classList.remove('selected'));
+        event.currentTarget.classList.add('selected');
+    };
+
+    async function renderTimeSlots(container) {
+        container.innerHTML = '<div class="text-center py-4"><div class="spinner-border spinner-border-sm"></div></div>';
+        try {
+            availableSlots = await MV.api.get('/api/patient/available-slots?doctor_id=' + bookingData.doctor_id + '&appointment_date=' + bookingData.appointment_date);
+            if (!availableSlots.length) {
+                container.innerHTML = '<p class="text-muted py-4 text-center">No open time slots available for this date. Please pick another date.</p>';
+                return;
+            }
+            container.innerHTML = '<h6 class="mb-3">4. Choose Time Slot</h6>' +
+                '<div class="time-grid">' +
+                  availableSlots.map(function (time) {
+                      const sel = time === bookingData.appointment_time ? 'selected' : '';
+                      return '<div class="time-slot ' + sel + '" onclick="selectTime(\'' + time + '\')">' +
+                          MV.fmt.time12(time) +
+                        '</div>';
+                  }).join('') +
+                '</div>';
+        } catch (err) {
+            container.innerHTML = '<p class="text-danger">Failed to load time slots</p>';
+        }
+    }
+
+    window.selectTime = function (time) {
+        bookingData.appointment_time = time;
+        document.querySelectorAll('.time-slot').forEach(el => el.classList.remove('selected'));
+        event.currentTarget.classList.add('selected');
+    };
+})();
+</script>
+</body>
+</html>

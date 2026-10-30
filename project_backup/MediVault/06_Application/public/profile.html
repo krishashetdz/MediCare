@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Profile · MediCare</title>
+
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link href="/assets/css/medivault-restyle.css" rel="stylesheet">
+<style>
+.profile-header {
+    background: linear-gradient(135deg, var(--mv-primary) 0%, var(--mv-primary-dark) 100%);
+    border-radius: var(--mv-radius-xl); padding: 2rem; color: white; margin-bottom: 2rem;
+    display: flex; align-items: center; gap: 1.5rem;
+}
+.profile-avatar {
+    width: 100px; height: 100px; border-radius: 50%; background: rgba(255,255,255,0.2);
+    display: flex; align-items: center; justify-content: center; font-size: 2.5rem; font-weight: 700;
+    border: 4px solid white;
+}
+.profile-info h3 { margin: 0 0 .5rem; font-size: 1.75rem; }
+.profile-info p { margin: 0; opacity: 0.9; font-size: .875rem; }
+.info-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 2rem;
+}
+.info-item {
+    padding: 1rem; background: var(--mv-surface-0); border-radius: var(--mv-radius-lg); border: 1px solid var(--mv-border);
+}
+.info-item label { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--mv-text-muted); margin-bottom: .25rem; display: block; }
+.info-item .value { font-size: 1rem; font-weight: 600; color: var(--mv-text); }
+.password-form { max-width: 500px; }
+</style>
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<script src="/assets/js/theme-init.js"></script>
+<script src="/runtime-config.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+
+<div class="mv-layout" id="mvShell"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/mv-core.js"></script>
+<script src="/assets/js/mv-shell.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    let user = {};
+
+    (async function init() {
+        const ctx = await MV.shell.mount({ title: 'Profile', subtitle: 'Manage your account' });
+        user = ctx.user;
+
+        const initials = user.name.split(' ').map(function (n) { return n[0]; }).join('').toUpperCase().slice(0, 2);
+
+        ctx.content.innerHTML =
+            '<div class="profile-header">'
+              + '<div class="profile-avatar">' + initials + '</div>'
+              + '<div class="profile-info">'
+                + '<h3>' + MV.esc(user.name) + '</h3>'
+                + '<p>' + MV.esc(user.email) + '</p>'
+                + '<span class="mv-badge mv-badge-primary" style="margin-top:.5rem">' + MV.esc(user.role) + '</span>'
+              + '</div>'
+            + '</div>'
+
+            + '<h5 style="margin-bottom:1rem">Account Information</h5>'
+            + '<div class="info-grid" id="infoGrid"></div>'
+
+            + '<div class="mv-card password-form" style="max-width:540px">'
+              + '<div class="mv-card-head">'
+                + '<div class="d-flex align-items-center gap-2">'
+                  + '<i class="fa-solid fa-lock text-primary"></i>'
+                  + '<h2 style="margin:0;font-size:16px;font-weight:600">Change Password</h2>'
+                + '</div>'
+                + '<span class="mv-badge is-neutral"><i class="fa-solid fa-key me-1"></i>Security</span>'
+              + '</div>'
+              + '<div class="mv-card-body p-4">'
+                + '<form id="passwordForm">'
+                  + '<div class="mb-3">'
+                    + '<label class="form-label">Current Password <span class="text-danger">*</span></label>'
+                    + '<input type="password" class="form-control" name="current_password" placeholder="Enter current password" required>'
+                  + '</div>'
+                  + '<div class="mb-3">'
+                    + '<label class="form-label">New Password <span class="text-danger">*</span></label>'
+                    + '<input type="password" class="form-control" name="new_password" placeholder="Minimum 8 characters" required minlength="8">'
+                  + '</div>'
+                  + '<div class="mb-3">'
+                    + '<label class="form-label">Confirm New Password <span class="text-danger">*</span></label>'
+                    + '<input type="password" class="form-control" name="confirm_password" placeholder="Repeat new password" required>'
+                  + '</div>'
+                  + '<button type="submit" class="mv-btn mv-btn-primary w-100 justify-content-center py-2">'
+                    + '<i class="fa-solid fa-shield-halved me-1"></i> Update Password'
+                  + '</button>'
+                + '</form>'
+              + '</div>'
+            + '</div>';
+
+        renderInfo();
+
+        document.getElementById('passwordForm').addEventListener('submit', handlePasswordChange);
+    })();
+
+    function renderInfo() {
+        const grid = document.getElementById('infoGrid');
+        if (!grid) return;
+
+        const fields = [];
+
+        if (user.role === 'Patient') {
+            fields.push(
+                { label: 'Phone', value: user.phone || 'N/A' },
+                { label: 'Blood Group', value: user.blood_group || 'N/A' },
+                { label: 'Address', value: user.address || 'N/A' },
+                { label: 'Emergency Contact', value: user.emergency_contact || 'N/A' }
+            );
+        } else if (user.role === 'Doctor') {
+            fields.push(
+                { label: 'Department', value: user.department_name || 'N/A' },
+                { label: 'Specialization', value: user.specialization || 'N/A' },
+                { label: 'Consultation Fee', value: user.consultation_fee ? '$' + user.consultation_fee : 'N/A' },
+                { label: 'Phone', value: user.phone || 'N/A' }
+            );
+        } else {
+            fields.push({ label: 'Email', value: user.email });
+        }
+
+        let html = '';
+        fields.forEach(function (field) {
+            html += '<div class="info-item">'
+                + '<label>' + MV.esc(field.label) + '</label>'
+                + '<div class="value">' + MV.esc(field.value) + '</div>'
+              + '</div>';
+        });
+
+        grid.innerHTML = html;
+    }
+
+    async function handlePasswordChange(e) {
+        e.preventDefault();
+        const form = e.target;
+        const data = Object.fromEntries(new FormData(form));
+
+        if (data.new_password !== data.confirm_password) {
+            MV.toast({ message: 'Passwords do not match', type: 'danger' });
+            return;
+        }
+
+        try {
+            await MV.api.post('/api/profile/change-password', {
+                current_password: data.current_password,
+                new_password: data.new_password
+            });
+            MV.toast({ message: 'Password updated', type: 'success' });
+            form.reset();
+        } catch (err) {
+            MV.toast({ message: err.message, type: 'danger' });
+        }
+    }
+})();
+</script>
+</body>
+</html>

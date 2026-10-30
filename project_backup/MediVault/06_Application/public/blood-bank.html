@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blood Bank — MediCare</title>
+
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link href="/assets/css/medivault-restyle.css" rel="stylesheet">
+<style>
+.blood-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1.25rem; margin-bottom: 2rem;
+}
+.blood-card {
+    padding: 1.25rem; background: var(--mv-surface-0); border-radius: var(--mv-radius-xl); border: 1px solid var(--mv-border);
+    box-shadow: var(--mv-shadow-sm);
+}
+.blood-card-header {
+    display: flex; align-items: center; gap: .75rem; margin-bottom: 1rem;
+}
+.blood-icon {
+    width: 44px; height: 44px; border-radius: var(--mv-radius-pill); background: linear-gradient(135deg, #EF4444 0%, #DC2626 100%);
+    display: flex; align-items: center; justify-content: center; color: white; font-weight: 700; font-size: 1.125rem;
+}
+.blood-card-body h5 {
+    font-size: 1.0625rem; font-weight: 600; margin: 0;
+}
+.blood-card-body p {
+    font-size: .8125rem; color: var(--mv-text-muted); margin: 0;
+}
+.units-gauge {
+    margin: 1rem 0;
+}
+.units-bar {
+    height: 8px; background: var(--mv-surface-2); border-radius: var(--mv-radius-pill); overflow: hidden;
+}
+.units-fill {
+    height: 100%; transition: width .3s ease, background-color .3s ease;
+}
+.units-fill.critical { background: var(--mv-danger); }
+.units-fill.low { background: var(--mv-warning); }
+.units-fill.good { background: var(--mv-success); }
+.units-text {
+    display: flex; justify-content: space-between; margin-top: .5rem; font-size: .8125rem; font-weight: 600;
+}
+.p-badge {
+    display: inline-flex; align-items: center; padding: .2rem .5rem; border-radius: var(--mv-radius-pill);
+    font-size: .75rem; font-weight: 700;
+}
+.p-badge.emergency { background: rgba(220, 38, 38, .15); color: #ef4444; }
+.p-badge.urgent { background: rgba(234, 88, 12, .15); color: #f97316; }
+.p-badge.normal { background: rgba(37, 99, 235, .15); color: #3b82f6; }
+</style>
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<script src="/assets/js/theme-init.js"></script>
+<script src="/runtime-config.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+
+<div class="mv-layout" id="mvShell"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/mv-core.js"></script>
+<script src="/assets/js/mv-shell.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    const GROUPS = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
+    const CRITICAL = 10;
+    const LOW = 30;
+
+    let userRole = '';
+
+    (async function init() {
+        const ctx = await MV.shell.mount({
+            roles: ['Admin', 'Doctor', 'Nurse'],
+            title: 'Blood Bank',
+            subtitle: 'Inventory, emergency transfusion & cross-matching requests'
+        });
+
+        userRole = ctx.user.role;
+
+        ctx.actions.innerHTML =
+            '<button type="button" class="mv-btn mv-btn-outline me-2" id="refreshBtn">' +
+              MV.icon('refresh-cw') + '<span>Refresh</span>' +
+            '</button>' +
+            '<button type="button" class="mv-btn mv-btn-primary" data-bs-toggle="modal" data-bs-target="#requestModal">' +
+              MV.icon('droplet') + '<span>Request Blood</span>' +
+            '</button>';
+        MV.icons(ctx.actions);
+
+        ctx.content.innerHTML =
+            '<div class="blood-grid" id="bloodGrid"></div>' +
+            '<div class="row g-4 mt-2">' +
+              '<div class="col-12">' +
+                '<div class="mv-card">' +
+                  '<div class="mv-card-head d-flex justify-content-between align-items-center">' +
+                    '<div><h3 class="m-0">Active Blood & Transfusion Requests</h3><small class="text-muted">Awaiting authorization and lab unit issuance</small></div>' +
+                    '<span class="badge bg-secondary" id="pendingCount">0 Pending</span>' +
+                  '</div>' +
+                  '<div class="table-responsive">' +
+                    '<table class="table table-hover align-middle m-0" id="requestsTable">' +
+                      '<thead><tr>' +
+                        '<th>#</th>' +
+                        '<th>Patient / Emergency</th>' +
+                        '<th>Blood Group</th>' +
+                        '<th>Units</th>' +
+                        '<th>Priority</th>' +
+                        '<th>Requested By</th>' +
+                        '<th>Reason</th>' +
+                        '<th>Status</th>' +
+                        '<th class="text-end">Actions</th>' +
+                      '</tr></thead>' +
+                      '<tbody id="requestsTbody">' +
+                        '<tr><td colspan="9" class="text-center py-4"><div class="spinner-border text-primary spinner-border-sm"></div></td></tr>' +
+                      '</tbody>' +
+                    '</table>' +
+                  '</div>' +
+                '</div>' +
+              '</div>' +
+              '<div class="col-12">' +
+                '<div class="mv-card">' +
+                  '<div class="mv-card-head">' +
+                    '<h3 class="m-0">Transfusion History & Audit Trail</h3>' +
+                    '<small class="text-muted">Fulfilled and closed requests with inventory deduction records</small>' +
+                  '</div>' +
+                  '<div class="table-responsive">' +
+                    '<table class="table table-hover align-middle m-0">' +
+                      '<thead><tr>' +
+                        '<th>ID</th>' +
+                        '<th>Patient</th>' +
+                        '<th>Group</th>' +
+                        '<th>Units Issued</th>' +
+                        '<th>Authorized By</th>' +
+                        '<th>Fulfilled Time</th>' +
+                        '<th>Status</th>' +
+                      '</tr></thead>' +
+                      '<tbody id="historyTbody">' +
+                        '<tr><td colspan="7" class="text-center py-4 text-muted">No past requests</td></tr>' +
+                      '</tbody>' +
+                    '</table>' +
+                  '</div>' +
+                '</div>' +
+              '</div>' +
+            '</div>';
+
+        // Create Request Modal
+        createRequestModal();
+
+        document.getElementById('refreshBtn').addEventListener('click', function () {
+            loadInventory();
+            loadRequests();
+        });
+
+        loadInventory();
+        loadRequests();
+
+        // Refresh periodically
+        setInterval(function () {
+            loadInventory();
+            loadRequests();
+        }, 30000);
+    })();
+
+    function createRequestModal() {
+        const modal = document.createElement('div');
+        modal.innerHTML =
+            '<div class="modal fade" id="requestModal" tabindex="-1">' +
+              '<div class="modal-dialog">' +
+                '<div class="modal-content">' +
+                  '<div class="modal-header">' +
+                    '<h5 class="modal-title"><i class="fas fa-droplet text-danger me-2"></i>Request Blood Units</h5>' +
+                    '<button type="button" class="btn-close" data-bs-dismiss="modal"></button>' +
+                  '</div>' +
+                  '<div class="modal-body">' +
+                    '<form id="requestForm">' +
+                      '<div class="mb-3">' +
+                        '<label class="form-label">Blood Group Required</label>' +
+                        '<select class="form-select" name="blood_group" required>' +
+                          '<option value="">Select group...</option>' +
+                          GROUPS.map(function (g) { return '<option value="' + g + '">' + g + '</option>'; }).join('') +
+                        '</select>' +
+                      '</div>' +
+                      '<div class="row g-3 mb-3">' +
+                        '<div class="col-md-6">' +
+                          '<label class="form-label">Units Needed (1-10)</label>' +
+                          '<input type="number" class="form-control" name="units" min="1" max="10" value="1" required>' +
+                        '</div>' +
+                        '<div class="col-md-6">' +
+                          '<label class="form-label">Acuity Priority</label>' +
+                          '<select class="form-select" name="priority">' +
+                            '<option value="Normal">Normal</option>' +
+                            '<option value="Urgent">Urgent</option>' +
+                            '<option value="Emergency" selected>Emergency Transfusion</option>' +
+                          '</select>' +
+                        '</div>' +
+                      '</div>' +
+                      '<div class="row g-3 mb-3">' +
+                        '<div class="col-md-6">' +
+                          '<label class="form-label">Patient ID</label>' +
+                          '<input type="number" class="form-control" name="patient_id" placeholder="Patient ID (e.g. 5)">' +
+                        '</div>' +
+                        '<div class="col-md-6">' +
+                          '<label class="form-label">Emergency Case ID (Optional)</label>' +
+                          '<input type="number" class="form-control" name="case_id" placeholder="Emergency Case ID">' +
+                        '</div>' +
+                      '</div>' +
+                      '<div class="mb-3">' +
+                        '<label class="form-label">Clinical Indication / Reason</label>' +
+                        '<textarea class="form-control" name="reason" rows="3" required placeholder="e.g. Acute hemoperitoneum, severe GI bleed, massive trauma resuscitation..."></textarea>' +
+                      '</div>' +
+                    '</form>' +
+                  '</div>' +
+                  '<div class="modal-footer">' +
+                    '<button type="button" class="mv-btn mv-btn-outline" data-bs-dismiss="modal">Cancel</button>' +
+                    '<button type="button" class="mv-btn mv-btn-primary" id="submitRequestBtn">Submit Blood Order</button>' +
+                  '</div>' +
+                '</div>' +
+              '</div>' +
+            '</div>';
+        document.body.appendChild(modal);
+
+        const modalInst = new bootstrap.Modal(document.getElementById('requestModal'));
+
+        document.getElementById('submitRequestBtn').addEventListener('click', async function () {
+            const form = document.getElementById('requestForm');
+            if (!form.checkValidity()) return form.reportValidity();
+
+            const data = Object.fromEntries(new FormData(form));
+            if (!data.patient_id && !data.case_id) {
+                MV.toast({ message: 'Enter either Patient ID or Emergency Case ID', type: 'danger' });
+                return;
+            }
+
+            const restore = MV.pending(this, 'Submitting...');
+            try {
+                const result = await MV.api.post('/api/admin/blood-bank/request', data);
+                MV.toast({ message: result.message, type: 'success' });
+                modalInst.hide();
+                form.reset();
+                loadRequests();
+            } catch (err) {
+                MV.toast({ message: err.message, type: 'danger' });
+            } finally {
+                restore();
+            }
+        });
+    }
+
+    /* ---------------------------------------------------- Inventory Loader */
+    async function loadInventory() {
+        try {
+            const inventory = await MV.api.get('/api/admin/blood-bank');
+            renderCards(inventory);
+        } catch (err) {
+            console.error('Failed to load blood inventory:', err);
+        }
+    }
+
+    function renderCards(inventory) {
+        const grid = document.getElementById('bloodGrid');
+        if (!grid) return;
+
+        const map = {};
+        inventory.forEach(function (row) { map[row.blood_group] = row.units_available; });
+
+        let html = '';
+        GROUPS.forEach(function (group) {
+            const units = map[group] || 0;
+            const max = 100;
+            const pct = Math.min((units / max) * 100, 100);
+
+            let gaugeClass = 'good';
+            if (units < CRITICAL) gaugeClass = 'critical';
+            else if (units < LOW) gaugeClass = 'low';
+
+            html += '<div class="blood-card">' +
+                '<div class="blood-card-header">' +
+                  '<div class="blood-icon">' + group + '</div>' +
+                  '<div class="blood-card-body">' +
+                    '<h5>Group ' + group + '</h5>' +
+                    '<p>' + (units < CRITICAL ? 'Critical Stock' : units < LOW ? 'Low Stock' : 'Adequate Stock') + '</p>' +
+                  '</div>' +
+                '</div>' +
+                '<div class="units-gauge">' +
+                  '<div class="units-bar">' +
+                    '<div class="units-fill ' + gaugeClass + '" style="width:' + pct + '%"></div>' +
+                  '</div>' +
+                  '<div class="units-text">' +
+                    '<span>' + units + ' units</span>' +
+                    '<span class="text-muted">/' + max + '</span>' +
+                  '</div>' +
+                '</div>' +
+              '</div>';
+        });
+
+        grid.innerHTML = html;
+    }
+
+    /* ---------------------------------------------------- Requests Loader */
+    async function loadRequests() {
+        try {
+            const allRequests = await MV.api.get('/api/admin/blood-bank/requests');
+            const pending = allRequests.filter(function (r) { return r.status === 'Pending' || r.status === 'Approved'; });
+            const history = allRequests.filter(function (r) { return r.status === 'Fulfilled' || r.status === 'Rejected'; });
+
+            document.getElementById('pendingCount').textContent = pending.length + ' Pending';
+
+            renderPendingTable(pending);
+            renderHistoryTable(history);
+        } catch (err) {
+            console.error('Failed to load blood requests:', err);
+        }
+    }
+
+    function renderPendingTable(requests) {
+        const tbody = document.getElementById('requestsTbody');
+        if (!tbody) return;
+
+        if (!requests.length) {
+            tbody.innerHTML = '<tr><td colspan="9" class="text-center py-4 text-muted">No pending blood requests in queue</td></tr>';
+            return;
+        }
+
+        let html = '';
+        requests.forEach(function (r) {
+            const priorityClass = (r.priority || 'normal').toLowerCase();
+            const patientDisplay = r.emg_number ? (r.patient_name + ' (' + r.emg_number + ')') : r.patient_name;
+
+            html += '<tr>' +
+                '<td class="fw-bold text-muted">#' + r.request_id + '</td>' +
+                '<td><strong>' + MV.esc(patientDisplay) + '</strong></td>' +
+                '<td><span class="badge bg-danger fs-6">' + MV.esc(r.blood_group) + '</span></td>' +
+                '<td><strong>' + r.units + '</strong> unit(s)</td>' +
+                '<td><span class="p-badge ' + priorityClass + '">' + MV.esc(r.priority) + '</span></td>' +
+                '<td>' + MV.esc(r.requested_by_name) + '</td>' +
+                '<td><small class="text-muted">' + MV.esc(r.reason) + '</small></td>' +
+                '<td>' + MV.badge(r.status) + '</td>' +
+                '<td class="text-end text-nowrap">';
+
+            if (r.status === 'Pending') {
+                html += '<button type="button" class="mv-btn mv-btn-sm mv-btn-outline me-1" onclick="window.approveRequest(' + r.request_id + ')">' +
+                    '<i class="fas fa-check text-success"></i> Approve</button>';
+            }
+
+            html += '<button type="button" class="mv-btn mv-btn-sm mv-btn-primary me-1" onclick="window.fulfillRequest(' + r.request_id + ')">' +
+                '<i class="fas fa-hand-holding-droplet"></i> Fulfill</button>' +
+                '<button type="button" class="mv-btn mv-btn-sm mv-btn-outline text-danger" onclick="window.rejectRequest(' + r.request_id + ')">' +
+                '<i class="fas fa-xmark"></i></button>' +
+              '</td></tr>';
+        });
+
+        tbody.innerHTML = html;
+    }
+
+    function renderHistoryTable(requests) {
+        const tbody = document.getElementById('historyTbody');
+        if (!tbody) return;
+
+        if (!requests.length) {
+            tbody.innerHTML = '<tr><td colspan="7" class="text-center py-4 text-muted">No past transfusion records</td></tr>';
+            return;
+        }
+
+        let html = '';
+        requests.forEach(function (r) {
+            html += '<tr>' +
+                '<td class="text-muted">#' + r.request_id + '</td>' +
+                '<td>' + MV.esc(r.patient_name) + '</td>' +
+                '<td><span class="badge bg-secondary">' + MV.esc(r.blood_group) + '</span></td>' +
+                '<td>' + r.units + ' unit(s)</td>' +
+                '<td>' + MV.esc(r.approved_by_name) + '</td>' +
+                '<td><small class="text-muted">' + (r.fulfilled_at ? new Date(r.fulfilled_at).toLocaleString() : '--') + '</small></td>' +
+                '<td>' + MV.badge(r.status) + '</td>' +
+              '</tr>';
+        });
+
+        tbody.innerHTML = html;
+    }
+
+    // Action functions
+    window.approveRequest = async function (id) {
+        try {
+            await MV.api.post('/api/admin/blood-bank/requests/' + id + '/approve');
+            MV.toast({ message: 'Blood request approved', type: 'success' });
+            loadRequests();
+        } catch (err) {
+            MV.toast({ message: err.message, type: 'danger' });
+        }
+    };
+
+    window.fulfillRequest = async function (id) {
+        const ok = await MV.confirm('Confirm blood unit issue? This will verify available stock and deduct units from Blood Bank inventory.');
+        if (!ok) return;
+
+        try {
+            const res = await MV.api.post('/api/admin/blood-bank/requests/' + id + '/fulfill');
+            MV.toast({ message: res.message, type: 'success' });
+            loadInventory();
+            loadRequests();
+        } catch (err) {
+            MV.toast({ message: err.message, type: 'danger' });
+        }
+    };
+
+    window.rejectRequest = async function (id) {
+        const ok = await MV.confirm('Reject this blood request?');
+        if (!ok) return;
+
+        try {
+            await MV.api.post('/api/admin/blood-bank/requests/' + id + '/reject');
+            MV.toast({ message: 'Request rejected', type: 'info' });
+            loadRequests();
+        } catch (err) {
+            MV.toast({ message: err.message, type: 'danger' });
+        }
+    };
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · MediCare</title>
+<meta name="description" content="MediVault hospital management system -- one sign-in for every role.">
+
+<!-- theme applied before first paint so a dark-mode user never sees a white flash -->
+<script>
+    try {
+        var saved = localStorage.getItem('mv-theme');
+        var mode = saved || 'light';
+        document.documentElement.setAttribute('data-theme', mode);
+    } catch (e) { /* private mode -- stay light */ }
+</script>
+
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link href="/assets/css/medivault.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<script src="/runtime-config.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+
+<div class="mv-login">
+
+    <!-- ============================== left: brand / gradient ============================== -->
+    <section class="mv-login-art" aria-labelledby="loginArtHeading">
+        <div class="mv-login-brand">
+            <span class="mv-logo" aria-hidden="true"><i data-lucide="heart-pulse"></i></span>
+            <span class="mv-login-brand-name">MediCare</span>
+        </div>
+
+        <div>
+            <h1 class="mv-login-headline" id="loginArtHeading">One hospital record system. Every role, one door.</h1>
+            <p class="mv-login-lede">
+                Appointments, wards, pharmacy stock, labs and billing -- all backed by a single
+                MySQL system of record, so what the front desk sees is what the ward sees.
+            </p>
+            <ul class="mv-login-points">
+                <li><i data-lucide="shield-check" aria-hidden="true"></i> Role-based access</li>
+                <li><i data-lucide="database" aria-hidden="true"></i> MySQL + MongoDB</li>
+                <li><i data-lucide="activity" aria-hidden="true"></i> Live stock &amp; bed status</li>
+            </ul>
+        </div>
+
+        <p class="mv-login-foot">MediCare · Hospital Management System</p>
+    </section>
+
+    <!-- ============================== right: sign-in form ============================== -->
+    <section class="mv-login-panel">
+        <div class="mv-login-card" id="loginCard">
+
+            <div class="d-flex align-items-start justify-content-between gap-2 mb-3">
+                <div>
+                    <h2 class="mv-login-title">Sign in</h2>
+                    <p class="mv-login-sub mb-0">Use your MediCare staff or patient account.</p>
+                </div>
+                <button type="button" class="mv-btn mv-btn-ghost mv-btn-icon" id="themeToggle"
+                        aria-label="Toggle dark mode" aria-pressed="false">
+                    <span id="themeIcon"><i data-lucide="moon"></i></span>
+                </button>
+            </div>
+
+            <!-- role="alert" so a screen reader announces a failed attempt -->
+            <div class="mv-login-alert" id="loginError" role="alert">
+                <i data-lucide="circle-alert" aria-hidden="true"></i>
+                <span id="loginErrorText"></span>
+            </div>
+
+            <form id="loginForm" novalidate>
+                <div class="mv-field">
+                    <label class="mv-label" for="email">Email address <span class="mv-req" aria-hidden="true">*</span></label>
+                    <input class="mv-input" type="email" id="email" name="email"
+                           autocomplete="username" required autofocus
+                           placeholder="you@medivault.in">
+                    <p class="mv-error"></p>
+                </div>
+
+                <div class="mv-field">
+                    <label class="mv-label" for="password">Password <span class="mv-req" aria-hidden="true">*</span></label>
+                    <div class="mv-pass-wrap">
+                        <input class="mv-input" type="password" id="password" name="password"
+                               autocomplete="current-password" required placeholder="Enter your password">
+                        <button type="button" class="mv-pass-toggle" id="passToggle"
+                                aria-label="Show password" aria-pressed="false">
+                            <i data-lucide="eye"></i>
+                        </button>
+                    </div>
+                    <p class="mv-error"></p>
+                </div>
+
+                <button type="submit" class="mv-btn mv-btn-primary mv-btn-block" id="loginBtn">
+                    <i data-lucide="log-in"></i><span>Sign in</span>
+                </button>
+            </form>
+
+            <!-- Demo accounts: these are the Phase 2 seed users. Kept because the
+                 whole point of this build is a walkthrough demo; the buttons only
+                 fill the form, they never bypass /api/auth/login. -->
+            <div class="mv-demo">
+                <p class="mv-demo-label" id="demoLabel">Demonstration accounts</p>
+                <div class="mv-demo-grid" role="group" aria-labelledby="demoLabel" id="demoGrid"></div>
+            </div>
+        </div>
+    </section>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="https://unpkg.com/lucide@0.451.0/dist/umd/lucide.min.js"></script>
+<script src="/assets/js/mv-core.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    const form = document.getElementById('loginForm');
+    const card = document.getElementById('loginCard');
+    const emailInput = document.getElementById('email');
+    const passInput = document.getElementById('password');
+    const submitBtn = document.getElementById('loginBtn');
+    const errorBox = document.getElementById('loginError');
+    const errorText = document.getElementById('loginErrorText');
+
+    MV.icons();
+    MV.watchForm(form);
+
+    /* ---------------------------------------------------------- theme toggle */
+    const themeBtn = document.getElementById('themeToggle');
+    function paintTheme() {
+        const dark = MV.theme.get() === 'dark';
+        themeBtn.setAttribute('aria-pressed', dark ? 'true' : 'false');
+        const slot = document.getElementById('themeIcon');
+        slot.innerHTML = MV.icon(dark ? 'sun' : 'moon');
+        MV.icons(slot);
+    }
+    themeBtn.addEventListener('click', function () { MV.theme.toggle(); paintTheme(); });
+    paintTheme();
+
+    /* -------------------------------------------------------- password reveal */
+    const passToggle = document.getElementById('passToggle');
+    passToggle.addEventListener('click', function () {
+        const shown = passInput.type === 'text';
+        passInput.type = shown ? 'password' : 'text';
+        passToggle.setAttribute('aria-pressed', shown ? 'false' : 'true');
+        passToggle.setAttribute('aria-label', shown ? 'Show password' : 'Hide password');
+        passToggle.innerHTML = MV.icon(shown ? 'eye' : 'eye-off');
+        MV.icons(passToggle);
+        passInput.focus();
+    });
+
+    /* --------------------------------------------------------- demo accounts */
+    // Seed credentials from 02_DDL_DML (password_hash values, which
+    // routes/auth.js accepts as a plaintext fallback for the demo data).
+    const DEMO = [
+        { role: 'Admin',        icon: 'shield',          email: 'admin@medivault.in',            pass: 'hash_admin1' },
+        { role: 'Doctor',       icon: 'stethoscope',     email: 'sharma.doc@medivault.in',       pass: 'hash_doc1' },
+        { role: 'Patient',      icon: 'user-round',      email: 'rahul.verma@gmail.com',         pass: 'hash_pat1' },
+        { role: 'Nurse',        icon: 'heart-handshake', email: 'kavita.joshi@medivault.in',     pass: 'hash_staff1' },
+        { role: 'Lab Tech',     icon: 'flask-conical',   email: 'arjun.pillai@medivault.in',     pass: 'hash_staff2' },
+        { role: 'Pharmacist',   icon: 'pill',            email: 'neha.kapoor@medivault.in',      pass: 'hash_staff3' },
+        { role: 'Receptionist', icon: 'concierge-bell',  email: 'suresh.rao@medivault.in',       pass: 'hash_staff4' }
+    ];
+
+    const grid = document.getElementById('demoGrid');
+    grid.innerHTML = DEMO.map(function (d, i) {
+        return '<button type="button" class="mv-demo-btn" data-i="' + i + '">' +
+            MV.icon(d.icon) + MV.esc(d.role) + '</button>';
+    }).join('');
+    MV.icons(grid);
+
+    grid.addEventListener('click', function (e) {
+        const btn = e.target.closest('.mv-demo-btn');
+        if (!btn) return;
+        const demo = DEMO[Number(btn.dataset.i)];
+        emailInput.value = demo.email;
+        passInput.value = demo.pass;
+        hideError();
+        MV.validateControl(emailInput);
+        MV.validateControl(passInput);
+        submitBtn.focus();
+    });
+
+    /* ------------------------------------------------------------- feedback */
+    function showError(message) {
+        errorText.textContent = message;
+        errorBox.classList.add('is-shown');
+        card.classList.remove('mv-shake');
+        void card.offsetWidth;              // restart the animation
+        card.classList.add('mv-shake');
+        passInput.select();
+    }
+    function hideError() {
+        errorBox.classList.remove('is-shown');
+        card.classList.remove('mv-shake');
+    }
+    form.addEventListener('input', hideError);
+
+    // Arriving here from an expired session should say why.
+    if (MV.qs('expired')) {
+        showError('Your session ended. Please sign in again.');
+        card.classList.remove('mv-shake');
+    }
+
+    /* --------------------------------------------------------------- submit */
+    form.addEventListener('submit', async function (e) {
+        e.preventDefault();
+        hideError();
+        if (!MV.validateForm(form)) return;
+
+        const restore = MV.pending(submitBtn, 'Signing in...');
+        try {
+            // noRedirect: a 401 here is a wrong password, not an expired session --
+            // the default handler would bounce us to this same page in a loop.
+            const data = await MV.api('/api/auth/login', {
+                method: 'POST',
+                body: { email: emailInput.value.trim(), password: passInput.value },
+                noRedirect: true
+            });
+            submitBtn.innerHTML = MV.icon('check') + '<span>Signed in</span>';
+            MV.icons(submitBtn);
+            window.location.href = data.redirect || '/';
+        } catch (err) {
+            restore();
+            showError(err.message);
+        }
+    });
+})();
+</script>
+</body>
+</html>

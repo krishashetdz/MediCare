@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Doctors · MediCare</title>
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link href="/assets/css/medivault-restyle.css" rel="stylesheet">
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<script src="/assets/js/theme-init.js"></script>
+<script src="/runtime-config.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+<div class="mv-layout" id="mvShell"></div>
+
+<!-- Add Doctor Modal -->
+<div class="modal fade" id="addDoctorModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title">Add Doctor</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <form id="addDoctorForm">
+          <div class="mb-3"><label class="form-label">Full Name</label><input type="text" class="form-control" name="name" required placeholder="Dr. "></div>
+          <div class="mb-3"><label class="form-label">Email</label><input type="email" class="form-control" name="email" required></div>
+          <div class="mb-3"><label class="form-label">Password</label><input type="password" class="form-control" name="password_hash" required placeholder="Temporary password"></div>
+          <div class="mb-3"><label class="form-label">Department</label><select class="form-select" name="department_id" required><option value="">Select...</option></select></div>
+          <div class="mb-3"><label class="form-label">Specialization</label><input type="text" class="form-control" name="specialization" required></div>
+          <div class="mb-3"><label class="form-label">Qualification</label><input type="text" class="form-control" name="qualification"></div>
+          <div class="mb-3"><label class="form-label">Consultation Fee (₹)</label><input type="number" class="form-control" name="consultation_fee" min="0" step="50" value="500"></div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="mv-btn mv-btn-primary" id="saveDoctor">Add Doctor</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/mv-core.js"></script>
+<script src="/assets/js/mv-shell.js"></script>
+<script>
+(function () {
+    'use strict';
+    let addModal;
+    let table;
+
+    (async function init() {
+        const ctx = await MV.shell.mount({ roles: ['Admin'], title: 'Doctors', subtitle: 'Medical staff roster' });
+
+        ctx.actions.innerHTML =
+            '<button type="button" class="mv-btn mv-btn-primary" id="addDoctorBtn"><i class="fas fa-plus"></i><span>Add Doctor</span></button>' +
+            '<button type="button" class="mv-btn mv-btn-outline" id="refreshBtn"><i class="fas fa-sync-alt"></i><span>Refresh</span></button>';
+
+        ctx.content.innerHTML =
+            '<div class="mv-card">' +
+              '<div class="mv-card-body" id="doctorSlot"></div>' +
+            '</div>' +
+            '<div class="mv-footer">MediCare - Hospital Management System</div>';
+
+        addModal = new bootstrap.Modal(document.getElementById('addDoctorModal'));
+        document.getElementById('addDoctorBtn').addEventListener('click', openAddModal);
+        document.getElementById('saveDoctor').addEventListener('click', saveDoctor);
+        document.getElementById('refreshBtn').addEventListener('click', function () { table.reload(); });
+
+        table = new MV.DataTable(document.getElementById('doctorSlot'), {
+            columns: [
+                { key: 'doctor_id',       label: 'ID' },
+                { key: 'name',            label: 'Name' },
+                { key: 'email',           label: 'Email' },
+                { key: 'department_name', label: 'Department' },
+                { key: 'specialization',  label: 'Specialization' },
+                { key: 'consultation_fee',label: 'Fee', render: function (r) { return '₹' + MV.fmt.numberIndian(r.consultation_fee); } }
+            ],
+            fetch: function () { return MV.api.get('/api/admin/doctors'); },
+            searchKeys: ['name', 'email', 'department_name', 'specialization'],
+            pageSize: 15,
+            searchPlaceholder: 'Search doctors...'
+        });
+
+        loadDepartments();
+    })();
+
+    async function loadDepartments() {
+        try {
+            const rows = await MV.api.get('/api/admin/departments');
+            const sel = document.querySelector('[name="department_id"]');
+            if (!sel) return;
+            rows.forEach(function (d) {
+                const opt = document.createElement('option');
+                opt.value = d.department_id;
+                opt.textContent = d.department_name;
+                sel.appendChild(opt);
+            });
+        } catch (err) { /* non-fatal */ }
+    }
+
+    async function openAddModal() {
+        document.getElementById('addDoctorForm').reset();
+        addModal.show();
+    }
+
+    async function saveDoctor() {
+        const form = document.getElementById('addDoctorForm');
+        if (!form.checkValidity()) { form.reportValidity(); return; }
+        const btn = document.getElementById('saveDoctor');
+        const restore = MV.pending(btn, 'Saving...');
+        const data = Object.fromEntries(new FormData(form));
+        try {
+            await MV.api.post('/api/admin/doctors', data);
+            MV.toast.success('Doctor added');
+            addModal.hide();
+            table.reload();
+        } catch (err) {
+            MV.toast.error('Failed to add doctor', err.message);
+        } finally { restore(); }
+    }
+})();
+</script>
+</body>
+</html>

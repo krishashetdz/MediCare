@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Doctor & Lab Reports · MediCare</title>
+
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link href="/assets/css/medivault-restyle.css" rel="stylesheet">
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<style>
+.report-section { margin-bottom: 32px; }
+.report-card { padding: 20px; border: 1px solid var(--mv-border); background: var(--mv-surface); border-radius: 4px; margin-bottom: 14px; }
+.report-card-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; gap: 12px; }
+.report-card h5 { margin: 0 0 4px; font-size: 16px; font-weight: 600; color: var(--mv-text); }
+.report-card p { margin: 0; font-size: 13px; color: var(--mv-text-muted); }
+.report-detail { background: var(--mv-surface-1); padding: 14px 16px; border-radius: 4px; margin-top: 12px; font-size: 13px; }
+.report-detail-row { display: flex; margin-bottom: 6px; }
+.report-detail-row:last-child { margin-bottom: 0; }
+.report-detail-label { width: 130px; font-weight: 600; color: var(--mv-text); flex-shrink: 0; }
+.report-detail-val { color: var(--mv-text); flex-grow: 1; }
+.rx-badge { font-size: 11px; padding: 2px 8px; border-radius: 3px; }
+.nav-pills-custom { display: flex; gap: 8px; border-bottom: 1px solid var(--mv-border); padding-bottom: 14px; margin-bottom: 24px; }
+.nav-pill-btn { background: transparent; border: 1px solid var(--mv-border); color: var(--mv-text-muted); padding: 8px 18px; border-radius: 4px; font-weight: 500; font-size: 13px; cursor: pointer; transition: all 0.15s; }
+.nav-pill-btn:hover { background: var(--mv-surface-1); color: var(--mv-text); }
+.nav-pill-btn.active { background: var(--mv-primary); color: var(--mv-action-ink); border-color: var(--mv-primary); }
+</style>
+<script src="/assets/js/theme-init.js"></script>
+<script src="/runtime-config.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+
+<div class="mv-layout" id="mvShell"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/mv-core.js"></script>
+<script src="/assets/js/mv-shell.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    let consultations = [];
+    let prescriptions = [];
+    let labReports = [];
+    let currentTab = 'consultations';
+
+    (async function init() {
+        const ctx = await MV.shell.mount({
+            roles: ['Patient'],
+            title: 'Doctor & Lab Reports',
+            subtitle: 'Clinical consultations, prescriptions, and diagnostic results'
+        });
+
+        ctx.content.innerHTML =
+            '<div class="nav-pills-custom" role="tablist">' +
+              '<button type="button" class="nav-pill-btn active" data-tab="consultations" onclick="switchTab(\'consultations\')">' +
+                '<i class="fas fa-user-doctor me-1"></i> Doctor Consultations' +
+              '</button>' +
+              '<button type="button" class="nav-pill-btn" data-tab="prescriptions" onclick="switchTab(\'prescriptions\')">' +
+                '<i class="fas fa-pills me-1"></i> Prescriptions' +
+              '</button>' +
+              '<button type="button" class="nav-pill-btn" data-tab="labs" onclick="switchTab(\'labs\')">' +
+                '<i class="fas fa-flask me-1"></i> Lab Reports' +
+              '</button>' +
+            '</div>' +
+
+            '<div id="tabContentArea"></div>' +
+
+            '<div class="mv-footer">' +
+              'MediCare - Hospital Management System' +
+            '</div>';
+
+        loadReports();
+    })();
+
+    window.switchTab = function (tab) {
+        currentTab = tab;
+        document.querySelectorAll('.nav-pill-btn').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.tab === tab);
+        });
+        renderTabContent();
+    };
+
+    async function loadReports() {
+        const area = document.getElementById('tabContentArea');
+        area.innerHTML = '<div class="text-center py-5"><div class="spinner-border spinner-border-sm text-primary"></div> Loading clinical records...</div>';
+
+        try {
+            const [cData, pData, lData] = await Promise.all([
+                MV.api.get('/api/patient/doctor-reports').catch(() => []),
+                MV.api.get('/api/patient/prescriptions').catch(() => []),
+                MV.api.get('/api/patient/lab-reports').catch(() => [])
+            ]);
+
+            consultations = cData || [];
+            prescriptions = pData || [];
+            labReports = lData || [];
+
+            renderTabContent();
+        } catch (err) {
+            area.innerHTML = '<p class="text-danger p-3">Failed to load reports: ' + MV.esc(err.message) + '</p>';
+        }
+    }
+
+    function renderTabContent() {
+        const area = document.getElementById('tabContentArea');
+        if (currentTab === 'consultations') {
+            renderConsultations(area);
+        } else if (currentTab === 'prescriptions') {
+            renderPrescriptions(area);
+        } else if (currentTab === 'labs') {
+            renderLabReports(area);
+        }
+    }
+
+    function renderConsultations(area) {
+        if (!consultations.length) {
+            area.innerHTML =
+                '<div class="mv-empty py-5 text-center">' +
+                  '<p class="mv-empty-title">No doctor consultation reports yet</p>' +
+                  '<p class="mv-empty-text text-muted mb-3">Completed consultations and clinical notes from your doctors will appear here.</p>' +
+                  '<a href="/patient-appointments.html" class="mv-btn mv-btn-primary mv-btn-sm">' +
+                    '<i class="fas fa-calendar-plus"></i><span>Book Appointment</span>' +
+                  '</a>' +
+                '</div>';
+            return;
+        }
+
+        area.innerHTML = consultations.map(function (c) {
+            const docDisplayName = (c.doctor_name || '').startsWith('Dr.') ? c.doctor_name : ('Dr. ' + (c.doctor_name || ''));
+            return '' +
+            '<div class="report-card">' +
+              '<div class="report-card-head">' +
+                '<div>' +
+                  '<h5>Consultation with ' + MV.esc(docDisplayName) + '</h5>' +
+                  '<p><i class="fas fa-hospital me-1"></i> ' + MV.esc(c.department_name) + ' (' + MV.esc(c.specialization || 'Specialist') + ') &bull; ' + MV.fmt.date(c.consultation_date || c.appointment_date) + '</p>' +
+                '</div>' +
+                '<span class="mv-badge is-success"><i class="fas fa-check"></i> Completed</span>' +
+              '</div>' +
+              '<div class="report-detail">' +
+                '<div class="report-detail-row">' +
+                  '<div class="report-detail-label">Reported Symptoms:</div>' +
+                  '<div class="report-detail-val">' + MV.esc(c.symptoms || 'None specified') + '</div>' +
+                '</div>' +
+                '<div class="report-detail-row">' +
+                  '<div class="report-detail-label">Doctor Diagnosis:</div>' +
+                  '<div class="report-detail-val fw-semibold text-primary">' + MV.esc(c.diagnosis || 'General Checkup') + '</div>' +
+                '</div>' +
+                (c.notes ?
+                '<div class="report-detail-row">' +
+                  '<div class="report-detail-label">Clinical Notes:</div>' +
+                  '<div class="report-detail-val">' + MV.esc(c.notes) + '</div>' +
+                '</div>' : '') +
+              '</div>' +
+            '</div>';
+        }).join('');
+    }
+
+    async function renderPrescriptions(area) {
+        if (!prescriptions.length) {
+            area.innerHTML =
+                '<div class="mv-empty py-5 text-center">' +
+                  '<p class="mv-empty-title">No prescriptions found</p>' +
+                  '<p class="mv-empty-text text-muted">Prescribed medications from your doctor visits will appear here.</p>' +
+                '</div>';
+            return;
+        }
+
+        area.innerHTML = '<div class="text-center py-4"><div class="spinner-border spinner-border-sm"></div> Loading prescription details...</div>';
+
+        // Load items for each prescription
+        const detailed = await Promise.all(prescriptions.map(async function (p) {
+            try {
+                const items = await MV.api.get('/api/patient/prescriptions/' + p.prescription_id + '/items');
+                return { ...p, items };
+            } catch (_) {
+                return { ...p, items: [] };
+            }
+        }));
+
+        area.innerHTML = detailed.map(function (p) {
+            const statusBadge = p.status === 'Dispensed' ?
+                '<span class="mv-badge is-success"><i class="fas fa-check-circle"></i> Dispensed</span>' :
+                '<span class="mv-badge is-warning"><i class="fas fa-clock"></i> Pending Pharmacy</span>';
+
+            const itemsHtml = p.items && p.items.length ?
+                '<table class="mv-table mt-3">' +
+                  '<thead><tr><th>Medicine</th><th>Dosage</th><th>Duration</th><th class="text-end">Qty</th></tr></thead>' +
+                  '<tbody>' +
+                    p.items.map(function (item) {
+                        return '<tr>' +
+                            '<td class="fw-medium">' + MV.esc(item.medicine_name) + '</td>' +
+                            '<td>' + MV.esc(item.dosage || '--') + '</td>' +
+                            '<td>' + MV.esc(item.duration_days ? item.duration_days + ' days' : '--') + '</td>' +
+                            '<td class="text-end">' + MV.esc(item.quantity) + '</td>' +
+                          '</tr>';
+                    }).join('') +
+                  '</tbody>' +
+                '</table>' : '<p class="text-muted small mt-2 mb-0">No specific items listed.</p>';
+
+            const docDisplayName = (p.doctor_name || '').startsWith('Dr.') ? p.doctor_name : ('Dr. ' + (p.doctor_name || ''));
+            return '' +
+            '<div class="report-card">' +
+              '<div class="report-card-head">' +
+                '<div>' +
+                  '<h5>Prescription #' + p.prescription_id + ' &bull; ' + MV.esc(docDisplayName) + '</h5>' +
+                  '<p>Prescribed on ' + MV.fmt.date(p.prescribed_date) + '</p>' +
+                '</div>' +
+                statusBadge +
+              '</div>' +
+              itemsHtml +
+            '</div>';
+        }).join('');
+    }
+
+    function renderLabReports(area) {
+        if (!labReports.length) {
+            area.innerHTML =
+                '<div class="mv-empty py-5 text-center">' +
+                  '<p class="mv-empty-title">No laboratory reports on file</p>' +
+                  '<p class="mv-empty-text text-muted">Diagnostic and pathology test reports ordered by doctors will appear here.</p>' +
+                '</div>';
+            return;
+        }
+
+        area.innerHTML = labReports.map(function (lr) {
+            return '' +
+            '<div class="report-card">' +
+              '<div class="report-card-head">' +
+                '<div>' +
+                  '<h5><i class="fas fa-flask text-primary me-2"></i>' + MV.esc(lr.test_name) + '</h5>' +
+                  '<p>Report Date: ' + MV.fmt.date(lr.report_date) + ' &bull; Request #' + lr.request_id + '</p>' +
+                '</div>' +
+                '<span class="mv-badge is-success"><i class="fas fa-file-check"></i> Available</span>' +
+              '</div>' +
+              '<div class="report-detail">' +
+                '<div class="report-detail-row">' +
+                  '<div class="report-detail-label">Result Summary:</div>' +
+                  '<div class="report-detail-val fw-medium">' + MV.esc(lr.result_summary || 'Normal') + '</div>' +
+                '</div>' +
+                (lr.raw && lr.raw.data ?
+                '<div class="report-detail-row">' +
+                  '<div class="report-detail-label">Detailed Values:</div>' +
+                  '<div class="report-detail-val"><code>' + MV.esc(JSON.stringify(lr.raw.data)) + '</code></div>' +
+                '</div>' : '') +
+              '</div>' +
+            '</div>';
+        }).join('');
+    }
+})();
+</script>
+</body>
+</html>

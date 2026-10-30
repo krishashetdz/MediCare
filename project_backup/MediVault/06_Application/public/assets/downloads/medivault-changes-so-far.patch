@@ -1,0 +1,2258 @@
+diff --git a/03_Queries/medivault_phase3_queries.sql b/03_Queries/medivault_phase3_queries.sql
+--- a/03_Queries/medivault_phase3_queries.sql
++++ b/03_Queries/medivault_phase3_queries.sql
+@@ -1,6 +1,6 @@
+ -- ============================================================
+ -- MediVault -- Phase 3: SELECT / Set Operations / GROUP BY / Joins / Subqueries
+--- (Experiments 2-6)
++-- (Experiments 3-6; DML is Experiment 2 in 02_DDL_DML)
+ -- Run this AFTER medivault_phase2_ddl_dml.sql has been loaded.
+ -- Every single query below was executed against a live MySQL-compatible
+ -- server on this exact dataset -- results are real, not hand-simulated.
+@@ -28,7 +28,7 @@
+ 
+ -- ============================================================
+ -- MediVault -- Phase 3: SELECT / Set Operations / GROUP BY / Joins / Subqueries
+--- (Experiments 2-6). Run after Phase 2's script and phase3_supplement.sql.
++-- (Experiments 3-6). Supplementary data is included above, not a separate file.
+ -- Tested end-to-end on a live MySQL-compatible server; every query below
+ -- returns real rows against the Phase 2 + supplement dataset (noted inline
+ -- where a result is intentionally empty or single-row).
+@@ -40,29 +40,65 @@
+ -- Demonstrates PRIMARY KEY, FOREIGN KEY, and CHECK constraint violations
+ -- ============================================================
+ 
++-- The invalid statements below intentionally fail. CONTINUE handlers record
++-- each expected MySQL error so the entire file runs WITHOUT mysql --force.
++-- Corrected statements are then executed normally. The demo rolls back all
++-- its rows, keeping the live hospital data unchanged and the demo repeatable.
++DROP PROCEDURE IF EXISTS sp_demo_constraints;
++DELIMITER $$
++CREATE PROCEDURE sp_demo_constraints()
++BEGIN
++  DECLARE caught INT DEFAULT 0;
++  DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN ROLLBACK; RESIGNAL; END;
++  START TRANSACTION;
++  BEGIN
++    DECLARE CONTINUE HANDLER FOR 1062 SET caught=1062;
+ -- IC1. PRIMARY KEY violation -- duplicate key
+ INSERT INTO ROLE (role_id, role_name) VALUES (1, 'Duplicate Admin');
++  END;
++  IF caught <> 1062 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Expected duplicate PK rejection'; END IF;
++  SELECT 'IC1 duplicate PK rejected' AS demonstration, caught AS mysql_error;
+ -- ERROR 1062 (23000): Duplicate entry '1' for key 'ROLE.PRIMARY'
+ -- Fix: use a unique role_id or let AUTO_INCREMENT assign it
+ INSERT INTO ROLE (role_name) VALUES ('Security Officer');
++  SELECT 'IC1 corrected insert succeeded' AS demonstration, LAST_INSERT_ID() AS inserted_id;
+ 
+ -- IC2. FOREIGN KEY violation -- reference to non-existent parent
++  SET caught=0;
++  BEGIN
++    DECLARE CONTINUE HANDLER FOR 1452 SET caught=1452;
+ INSERT INTO DOCTOR (doctor_id, department_id, specialization, consultation_fee)
+ VALUES (999, 999, 'Non-existent Dept', 500.00);
++  END;
++  IF caught <> 1452 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Expected bad FK rejection'; END IF;
++  SELECT 'IC2 bad FK rejected' AS demonstration, caught AS mysql_error;
+ -- ERROR 1452 (23000): Cannot add or update a child row: a foreign key constraint fails
+ -- Fix: reference an existing department_id
+ INSERT INTO `USER` (name, email, password_hash, phone, role_id) VALUES
+ ('Dr. Test User', 'test.doc@medivault.in', 'hash_test', '9800099999', 2);
+ INSERT INTO DOCTOR (doctor_id, department_id, specialization, consultation_fee)
+ VALUES (LAST_INSERT_ID(), 1, 'Test Specialty', 500.00);
++  SELECT 'IC2 corrected insert succeeded' AS demonstration, LAST_INSERT_ID() AS inserted_id;
+ 
+ -- IC3. CHECK constraint violation -- negative price
++  SET caught=0;
++  BEGIN
++    DECLARE CONTINUE HANDLER FOR 3819, 4025 SET caught=3819;
+ INSERT INTO MEDICINE (medicine_name, unit_price, stock_qty)
+ VALUES ('Invalid Medicine', -10.00, 50);
++  END;
++  IF caught <> 3819 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Expected CHECK rejection'; END IF;
++  SELECT 'IC3 CHECK rejected' AS demonstration, caught AS mysql_error;
+ -- ERROR 3819 (HY000): Check constraint 'medicine_chk_1' is violated.
+ -- Fix: use a non-negative price
+ INSERT INTO MEDICINE (medicine_name, unit_price, stock_qty)
+ VALUES ('Valid Medicine', 10.00, 50);
++  SELECT 'IC3 corrected insert succeeded' AS demonstration, LAST_INSERT_ID() AS inserted_id;
++  ROLLBACK;
++END$$
++DELIMITER ;
++CALL sp_demo_constraints();
++DROP PROCEDURE sp_demo_constraints;
+ 
+ -- ============================================================
+ -- EXPERIMENT 3 -- SELECT with WHERE, DISTINCT, ORDER BY, LIMIT, LIKE,
+diff --git a/04_Views_Triggers_Procs/medivault_phase4_views_triggers_procs.sql b/04_Views_Triggers_Procs/medivault_phase4_views_triggers_procs.sql
+--- a/04_Views_Triggers_Procs/medivault_phase4_views_triggers_procs.sql
++++ b/04_Views_Triggers_Procs/medivault_phase4_views_triggers_procs.sql
+@@ -21,7 +21,7 @@
+ -- 1. Doctor dashboard: today's schedule
+ CREATE OR REPLACE VIEW vw_doctor_today_schedule AS
+ SELECT a.appointment_id, doc.doctor_id, ud.name AS doctor_name,
+-       up.name AS patient_name, a.appointment_time, a.status
++       up.name AS patient_name, a.patient_id, a.appointment_time, a.status
+ FROM APPOINTMENT a
+ JOIN DOCTOR doc ON a.doctor_id = doc.doctor_id JOIN `USER` ud ON doc.doctor_id = ud.user_id
+ JOIN PATIENT p ON a.patient_id = p.patient_id JOIN `USER` up ON p.patient_id = up.user_id
+@@ -96,8 +96,10 @@
+     DECLARE insufficient_count INT DEFAULT 0;
+     IF NEW.status = 'Dispensed' AND OLD.status <> 'Dispensed' THEN
+         SELECT COUNT(*) INTO insufficient_count
+-        FROM PRESCRIPTION_ITEM pi JOIN MEDICINE m ON pi.medicine_id = m.medicine_id
+-        WHERE pi.prescription_id = NEW.prescription_id AND m.stock_qty < pi.quantity;
++        FROM (SELECT medicine_id, SUM(quantity) AS required_qty FROM PRESCRIPTION_ITEM
++              WHERE prescription_id=NEW.prescription_id GROUP BY medicine_id) pi
++        JOIN MEDICINE m ON pi.medicine_id = m.medicine_id
++        WHERE m.stock_qty < pi.required_qty;
+ 
+         IF insufficient_count > 0 THEN
+             SIGNAL SQLSTATE '45000'
+@@ -105,9 +107,10 @@
+         END IF;
+ 
+         UPDATE MEDICINE m
+-        JOIN PRESCRIPTION_ITEM pi ON m.medicine_id = pi.medicine_id
+-        SET m.stock_qty = m.stock_qty - pi.quantity
+-        WHERE pi.prescription_id = NEW.prescription_id;
++        JOIN (SELECT medicine_id, SUM(quantity) AS required_qty FROM PRESCRIPTION_ITEM
++              WHERE prescription_id=NEW.prescription_id GROUP BY medicine_id) pi
++          ON m.medicine_id = pi.medicine_id
++        SET m.stock_qty = m.stock_qty - pi.required_qty;
+     END IF;
+ END$$
+ 
+diff --git a/05_MongoDB/medivault_phase5_mongodb.js b/05_MongoDB/medivault_phase5_mongodb.js
+--- a/05_MongoDB/medivault_phase5_mongodb.js
++++ b/05_MongoDB/medivault_phase5_mongodb.js
+@@ -1,8 +1,8 @@
+ // ============================================================
+ // MediVault -- Phase 5: MongoDB Hybrid Module (Experiment 9)
+-// Every operation below was validated against a live Mongo-compatible
+-// engine (mongomock, driven through pymongo) using this exact document
+-// shape and data -- the CRUD logic is proven, not hand-simulated.
++// Core/extended separation follows the supplied Experiment 9 CRUD mapping:
++// insert, find, update and delete are core; nested shapes, projections,
++// sort/limit and retention examples provide additional depth.
+ // ============================================================
+ 
+ // ------------------------------------------------------------
+@@ -45,6 +45,8 @@
+ // COLLECTION 1: audit_log
+ // ============================================================
+ 
++// Core operations (syllabus ask)
++
+ // insertMany -- each entry's "details" payload naturally differs by action type
+ db.audit_log.insertMany([
+     {
+@@ -67,6 +69,7 @@
+ // find -- every audit entry touching a given table
+ db.audit_log.find({ table_affected: "APPOINTMENT" });
+ 
++// Extended operations (added depth)
+ // find with sort + limit -- most recent 2 actions (admin activity feed)
+ db.audit_log.find().sort({ timestamp: -1 }).limit(2);
+ 
+@@ -79,6 +82,8 @@
+ // ============================================================
+ // COLLECTION 2: lab_reports_raw (flexible shape per test type)
+ // ============================================================
++
++// Core operations (syllabus ask)
+ 
+ // insertOne -- CBC: a list of named numeric parameters with reference ranges
+ db.lab_reports_raw.insertOne({
+@@ -109,6 +114,7 @@
+     ]
+ });
+ 
++// Extended operations (added depth)
+ // find with dot-notation into a nested array -- every abnormal result, across
+ // test types that don't even share a schema (this is the query a rigid SQL
+ // table would need a UNION-across-N-tables to answer)
+@@ -123,6 +129,7 @@
+     { $push: { parameters: { name: "VLDL", value: 32, unit: "mg/dL", flag: "Normal", reference_range: "5-40" } } }
+ );
+ 
++// Core operations (syllabus ask)
+ // updateMany -- flag every report from a technician as reviewed by the lab head
+ db.lab_reports_raw.updateMany(
+     { technician_id: 12 },
+@@ -132,5 +139,6 @@
+ // deleteOne -- retract a single erroneously-entered report
+ db.lab_reports_raw.deleteOne({ request_id: 3 });
+ 
++// Extended operations (added depth)
+ // deleteMany -- purge raw reports older than the 7-year retention window
+ db.lab_reports_raw.deleteMany({ report_date: { $lt: ISODate("2019-09-16T00:00:00Z") } });
+diff --git a/06_Application/config/db.js b/06_Application/config/db.js
+--- a/06_Application/config/db.js
++++ b/06_Application/config/db.js
+@@ -13,10 +13,11 @@
+     connectionLimit: 10
+ });
+ 
+-// MongoDB: notifications / audit_log / lab_reports_raw (see Phase 5)
++// MongoDB: audit_log / lab_reports_raw. Notifications remain in MySQL.
+ let mongoDb = null;
+ async function connectMongo() {
+-    const uri = process.env.MONGO_URI || 'mongodb://localhost:27017';
++    const uri = process.env.MONGO_URL || process.env.MONGO_URI;
++    if (!uri) throw new Error('MONGO_URL must be configured');
+     const client = new MongoClient(uri, { serverSelectionTimeoutMS: 2000 });
+     await client.connect();
+     mongoDb = client.db('medivault');
+diff --git a/06_Application/package.json b/06_Application/package.json
+--- a/06_Application/package.json
++++ b/06_Application/package.json
+@@ -3,13 +3,16 @@
+   "version": "1.0.0",
+   "description": "MediVault Hospital Management System - Node/Express + MySQL + MongoDB",
+   "main": "server.js",
+-  "scripts": { "start": "node server.js" },
++  "scripts": {
++    "start": "node server.js"
++  },
+   "dependencies": {
++    "bcryptjs": "^2.4.3",
++    "dotenv": "^16.4.5",
+     "express": "^4.19.2",
++    "express-async-errors": "^3.1.1",
+     "express-session": "^1.18.0",
+-    "mysql2": "^3.10.0",
+     "mongodb": "^6.7.0",
+-    "bcryptjs": "^2.4.3",
+-    "dotenv": "^16.4.5"
++    "mysql2": "^3.10.0"
+   }
+ }
+diff --git a/06_Application/public/404.html b/06_Application/public/404.html
+--- a/06_Application/public/404.html
++++ b/06_Application/public/404.html
+@@ -34,6 +34,9 @@
+     display: flex; align-items: center; justify-content: center; color: var(--mv-primary);
+ }
+ </style>
++<link rel="stylesheet" href="/assets/css/clinical-record.css">
++<script src="/assets/js/theme-init.js"></script>
++<script src="/assets/js/record-accessibility.js" defer></script>
+ </head>
+ <body>
+ 
+diff --git a/06_Application/public/admin-dashboard.html b/06_Application/public/admin-dashboard.html
+--- a/06_Application/public/admin-dashboard.html
++++ b/06_Application/public/admin-dashboard.html
+@@ -8,6 +8,10 @@
+ <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+ <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+ <link href="/assets/css/medivault-restyle.css" rel="stylesheet">
++<link rel="stylesheet" href="/assets/css/clinical-record.css">
++<script src="/assets/js/theme-init.js"></script>
++<script src="/runtime-config.js"></script>
++<script src="/assets/js/record-accessibility.js" defer></script>
+ </head>
+ <body>
+ 
+@@ -46,9 +50,8 @@
+     const STATS = [
+         { key: 'patients',     label: 'Total Patients',  icon: 'users',      tone: 'primary' },
+         { key: 'doctors',      label: 'Doctors',         icon: 'user-doctor', tone: 'info' },
+-        { key: 'appointments', label: "Today's Appts.",  icon: 'calendar',   tone: 'primary' },
++        { key: 'appointments', label: 'Appointments',  icon: 'calendar',   tone: 'primary' },
+         { key: 'beds',         label: 'Available Beds',  icon: 'bed',        tone: 'success' },
+-        { key: 'emergency',    label: 'Emergency',       icon: 'truck-medical', tone: 'danger' },
+         { key: 'labs',         label: 'Pending Reports', icon: 'flask',      tone: 'warning' },
+         { key: 'lowStock',     label: 'Low Stock Meds',  icon: 'pills',      tone: 'danger' },
+         { key: 'ambulance',    label: 'Ambulances Free', icon: 'ambulance',  tone: 'info' }
+@@ -168,8 +171,7 @@
+         const low = Number(d.low_stock_medicines || 0);
+         setStat('lowStock', low, low > 0 ? 'Below 20 units' : 'Stock OK');
+ 
+-        setStat('emergency', 0, 'No emergencies');
+-        setStat('ambulance', 0, '');
++        MV.api.get('/api/admin/ambulances/available').then(r=>setStat('ambulance',r.count,'Available for dispatch')).catch(()=>setStat('ambulance',null,'Unavailable'));
+     }
+ 
+     // HERO ELEMENT: Ward bed grid
+@@ -238,7 +240,11 @@
+                     label: 'Revenue',
+                     data: values,
+                     tension: 0.3,
+-                    fill: true
++                    fill: false,
++                    borderColor: '#5D6965',
++                    backgroundColor: '#5D6965',
++                    borderWidth: 2,
++                    pointRadius: 4
+                 }]
+             },
+             options: {
+diff --git a/06_Application/public/ambulance.html b/06_Application/public/ambulance.html
+--- a/06_Application/public/ambulance.html
++++ b/06_Application/public/ambulance.html
+@@ -35,6 +35,10 @@
+ }
+ .ambulance-info strong { color: var(--mv-text); }
+ </style>
++<link rel="stylesheet" href="/assets/css/clinical-record.css">
++<script src="/assets/js/theme-init.js"></script>
++<script src="/runtime-config.js"></script>
++<script src="/assets/js/record-accessibility.js" defer></script>
+ </head>
+ <body>
+ 
+@@ -116,8 +120,8 @@
+             data.ambulance_id = selectedAmb.ambulance_id;
+ 
+             try {
+-                await MV.api.post('/api/admin/ambulance/' + selectedAmb.ambulance_id + '/dispatch', data);
+-                MV.toast({ message: 'Ambulance dispatched', type: 'success' });
++                const result = await MV.api.post('/api/admin/ambulance/' + selectedAmb.ambulance_id + '/dispatch', data);
++                MV.toast({ message: result.message, type: result.warning ? 'warning' : 'success' });
+                 modalInst.hide();
+                 form.reset();
+                 loadAmbulances();
+@@ -197,7 +201,7 @@
+     };
+ 
+     window.releaseAmbulance = async function (id) {
+-        if (!confirm('Mark this ambulance as available?')) return;
++        if (!await MV.confirm({title:'Mark available?',message:'The ambulance will return to the available fleet.',confirmText:'Mark available',kind:'primary'})) return;
+         try {
+             await MV.api.post('/api/admin/ambulance/' + id + '/release');
+             MV.toast({ message: 'Ambulance marked available', type: 'success' });
+diff --git a/06_Application/public/assets/css/clinical-record.css b/06_Application/public/assets/css/clinical-record.css
+new file mode 100644
+--- /dev/null
++++ b/06_Application/public/assets/css/clinical-record.css
+@@ -0,0 +1,173 @@
++/* Approved clinical-record system. Loaded after page-local styles. */
++@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;450;500;600;700&family=Source+Serif+4:wght@400;500;600&display=swap');
++:root, [data-theme="light"] {
++  color-scheme: light;
++  --mv-bg:#F7F8F5; --mv-surface:#fff; --mv-surface-0:#fff; --mv-surface-1:#F0F2EE; --mv-surface-2:#E8ECE6; --mv-surface-alt:#F0F2EE;
++  --mv-text:#252B2A; --mv-text-muted:#5D6965; --mv-text-faint:#5D6965; --mv-primary:#252B2A; --mv-primary-dark:#121715; --mv-primary-light:#424D48; --mv-primary-soft:#E8ECE6;
++  --mv-success:#315C45; --mv-success-soft:#E7EFE8; --mv-danger:#9A3543; --mv-danger-soft:#F8EAED; --mv-warning:#765314; --mv-warning-soft:#F8EDCF; --mv-gold:#E7BA5C; --mv-info:#5D6965; --mv-info-soft:#E8ECE6;
++  --mv-sidebar:#F0F2EE; --mv-sidebar-hover:#E4E8E1; --mv-border:#D6DCD5; --mv-border-strong:#87938B; --mv-sidebar-w:232px; --mv-topbar-h:72px;
++  --mv-radius-sm:3px; --mv-radius:4px; --mv-radius-card:0; --mv-radius-btn:4px; --mv-radius-md:4px; --mv-radius-lg:6px; --mv-radius-xl:6px; --mv-radius-pill:3px;
++  --mv-shadow-sm:none; --mv-shadow:none; --mv-shadow-md:none; --mv-shadow-lg:0 16px 48px #16231b24; --mv-focus:0 0 0 3px #315C4540;
++  --mv-action-ink:#fff; --mv-focus-color:#315C45;
++  --bs-body-color:var(--mv-text); --bs-body-bg:var(--mv-bg); --bs-border-color:var(--mv-border); --bs-secondary-color:var(--mv-text-muted);
++}
++[data-theme="dark"] {
++  color-scheme:dark;
++  --mv-bg:#191D1B; --mv-surface:#202622; --mv-surface-0:#202622; --mv-surface-1:#282F2A; --mv-surface-2:#343D36; --mv-surface-alt:#282F2A;
++  --mv-text:#F1F3EF; --mv-text-muted:#BAC5BD; --mv-text-faint:#BAC5BD; --mv-primary:#E7EBE5; --mv-primary-dark:#fff; --mv-primary-light:#CCD4CB; --mv-primary-soft:#343D36;
++  --mv-success:#A5D3B1; --mv-success-soft:#263D2D; --mv-danger:#F1A4AE; --mv-danger-soft:#442A30; --mv-warning:#E7BA5C; --mv-warning-soft:#3F3522; --mv-info:#BAC5BD; --mv-info-soft:#343D36;
++  --mv-sidebar:#202622; --mv-sidebar-hover:#303A32; --mv-border:#48534B; --mv-border-strong:#839487; --mv-action-ink:#191D1B; --mv-focus-color:#A5D3B1; --mv-focus:0 0 0 3px #A5D3B140;
++}
++html {scroll-padding-top:90px}
++body {font-family:'IBM Plex Sans',sans-serif;font-size:14px;line-height:1.55;background:var(--mv-bg);color:var(--mv-text);font-variant-numeric:tabular-nums;letter-spacing:0}
++*, *::before, *::after {box-sizing:border-box}
++h1,h2,h3,h4,h5,h6,p {overflow-wrap:anywhere}
++h1,h2,h3,h4,h5,h6 {color:var(--mv-text);letter-spacing:0;font-family:'IBM Plex Sans',sans-serif}
++h1,.mv-page-title,.mv-login-title,.invoice-letterhead h1,.modal-title {font-family:'Source Serif 4',serif;font-weight:500}
++h2 {font-size:18px} h3,h5,h6 {font-size:16px}
++button,input,select,textarea {font-family:inherit;letter-spacing:0}
++a {color:var(--mv-primary)} a:hover {color:var(--mv-primary);text-decoration:underline}
++::selection {background:var(--mv-gold);color:#252B2A}
++:focus-visible,.form-control:focus-visible,.form-select:focus-visible,.mv-input:focus-visible {outline:2px solid var(--mv-focus-color)!important;outline-offset:3px;box-shadow:none!important}
++.text-muted,.text-secondary {color:var(--mv-text-muted)!important}
++.text-primary {color:var(--mv-primary)!important}.text-success {color:var(--mv-success)!important}.text-danger {color:var(--mv-danger)!important}.text-warning {color:var(--mv-warning)!important}
++.mv-layout {min-height:100vh}.mv-main {min-width:0}
++.mv-sidebar {background:var(--mv-sidebar);border-right:1px solid var(--mv-border);box-shadow:none}
++.mv-sidebar-brand {padding:27px 24px;border-bottom:0;gap:11px}
++.mv-logo {display:grid;place-items:center;background:transparent;color:var(--mv-text);width:28px;height:28px;border-radius:0}
++.mv-logo i {font-size:25px}.mv-sidebar-name {font:500 25px 'Source Serif 4',serif;color:var(--mv-text)}
++.mv-nav {padding:26px 16px}.mv-nav-link {border-radius:3px;color:var(--mv-text-muted);padding:12px;margin-bottom:5px;font-size:14px;font-weight:450;gap:13px;border-left:2px solid transparent}
++.mv-nav-link i {width:18px;text-align:center;font-size:15px}
++.mv-nav-link:hover {background:var(--mv-sidebar-hover);color:var(--mv-text)}
++.mv-nav-link[aria-current="page"] {background:var(--mv-sidebar-hover);color:var(--mv-text);border-left-color:var(--mv-success);font-weight:600}
++.mv-sidebar-foot {border-top:1px solid var(--mv-border);padding:16px 24px}.mv-sidebar-foot .mv-btn {color:var(--mv-text);border-color:var(--mv-border-strong)}
++.mv-topbar {background:var(--mv-bg);padding:0 40px;border-bottom:1px solid var(--mv-border)}
++.mv-topbar-context {color:var(--mv-text-muted);font-size:13px;display:flex;gap:10px;align-items:center}
++.mv-topbar-context i {font-size:13px}.mv-topbar-right {gap:16px}
++.mv-userchip {color:var(--mv-text)}.mv-userchip-name {font-size:13px}.mv-userchip-role {font-size:12px}
++.mv-avatar {background:var(--mv-primary-soft);color:var(--mv-text);border:1px solid var(--mv-border);border-radius:4px;width:35px;height:35px}
++.mv-page {max-width:1512px;padding:38px 40px 48px}.mv-page-head {gap:20px;align-items:flex-end;padding-bottom:26px;margin-bottom:28px;border-bottom:1px solid var(--mv-border);flex-wrap:wrap}
++.mv-page-title {font-size:34px;line-height:1.2;margin:0}.mv-page-sub {font-size:14px;margin-top:7px;color:var(--mv-text-muted)}
++.mv-page-actions {align-items:center}.mv-footer {background:transparent;text-align:left;padding:28px 0 0;margin-top:36px;font-size:12px;border-top:1px solid var(--mv-border);color:var(--mv-text-muted)}
++.mv-card {background:transparent;border:0;border-radius:0;box-shadow:none;overflow:visible;margin-bottom:30px}
++.mv-card-head,.mv-card-header {background:transparent;border-bottom:1px solid var(--mv-border);border-top:2px solid var(--mv-text);padding:18px 0 15px;gap:16px;flex-wrap:wrap}
++.mv-card-head h2,.mv-card-head h3,.mv-card-header h2 {font-family:'IBM Plex Sans',sans-serif;font-size:17px;font-weight:600}
++.mv-card-body {padding:18px 0}.mv-card-body.p-4 {padding:24px 0!important}
++.mv-stat {background:transparent;border:0;border-left:1px solid var(--mv-border);border-radius:0;box-shadow:none;padding:8px 20px 14px;height:100%}
++.mv-stat-value {font:500 32px/1.2 'IBM Plex Sans',sans-serif;color:var(--mv-text);margin:7px 0;letter-spacing:0}
++.mv-stat-label {font:450 13px 'IBM Plex Sans',sans-serif;text-transform:none;letter-spacing:0;color:var(--mv-text-muted);margin-bottom:10px}
++.mv-stat-note {font-size:12px;margin:8px 0 0}.mv-stat-icon,.mv-stat-icon[class*="is-"] {background:transparent;color:var(--mv-text-muted);width:24px;height:24px;border-radius:0}
++#statGrid {row-gap:18px!important;margin-bottom:34px!important}.schedule-stats {margin-bottom:36px}
++.mv-btn,.btn {border-radius:4px;font:500 14px/1.4 'IBM Plex Sans',sans-serif;padding:10px 15px;min-height:40px;gap:8px;white-space:normal;transition:background-color .15s,border-color .15s,color .15s;letter-spacing:0}
++.mv-btn:hover,.btn:hover {transform:none;box-shadow:none}.mv-btn:disabled,.btn:disabled {opacity:.65;cursor:not-allowed}
++.mv-btn-primary,.btn-primary {background:var(--mv-primary);border-color:var(--mv-primary);color:var(--mv-action-ink)}
++.mv-btn-primary:hover,.btn-primary:hover,.mv-btn-primary:active,.btn-primary:active {background:var(--mv-primary-dark)!important;border-color:var(--mv-primary-dark)!important;color:var(--mv-action-ink)!important}
++.mv-btn-outline,.btn-secondary {background:transparent;color:var(--mv-text);border:1px solid var(--mv-border-strong)}
++.mv-btn-outline:hover,.btn-secondary:hover {background:var(--mv-surface-2);border-color:var(--mv-text);color:var(--mv-text)}
++.mv-btn-ghost {color:var(--mv-text-muted)}.mv-btn-ghost:hover {background:var(--mv-surface-2);color:var(--mv-text)}
++.mv-btn-success,.btn-success {background:var(--mv-success);border-color:var(--mv-success);color:var(--mv-action-ink)}
++.mv-btn-success:hover,.btn-success:hover {background:var(--mv-success);color:var(--mv-action-ink);filter:brightness(.92)}
++.mv-btn-danger,.btn-danger {background:var(--mv-danger);border-color:var(--mv-danger);color:var(--mv-action-ink)}
++.mv-btn-warning,.btn-warning {background:var(--mv-gold);border-color:var(--mv-gold);color:#252B2A}
++.mv-btn-icon {width:40px;height:40px;padding:9px;flex-shrink:0}.mv-btn-sm,.btn-sm {font-size:12px;padding:7px 10px;min-height:34px}
++.mv-badge {border-radius:2px;font-size:12px;font-weight:500;line-height:1.4;padding:4px 7px;gap:5px;letter-spacing:0;background:var(--mv-surface-2);color:var(--mv-text-muted);white-space:normal}
++.mv-badge.is-success,.mv-badge-success {background:var(--mv-success-soft);color:var(--mv-success)}
++.mv-badge.is-danger,.mv-badge-danger {background:var(--mv-danger-soft);color:var(--mv-danger)}
++.mv-badge.is-warning,.mv-badge-warning {background:var(--mv-warning-soft);color:var(--mv-warning)}
++.mv-badge.is-info,.mv-badge-info,.mv-badge.is-primary,.mv-badge-primary,.mv-badge.is-neutral {background:var(--mv-info-soft);color:var(--mv-text-muted)}
++.form-label,.mv-label {font-size:13px;font-weight:500;color:var(--mv-text);text-transform:none;letter-spacing:0}
++.form-control,.form-select,.mv-input,.mv-select,.mv-textarea {background-color:var(--mv-surface);color:var(--mv-text);border:1px solid var(--mv-border-strong);border-radius:4px;font-size:14px;min-height:42px;padding:10px 12px}
++.form-select {padding-right:36px}.form-control::placeholder,.mv-input::placeholder,.mv-textarea::placeholder {color:var(--mv-text-muted);opacity:1}
++.form-control:focus,.form-select:focus,.mv-input:focus {background-color:var(--mv-surface);color:var(--mv-text);border-color:var(--mv-focus-color)}
++.form-control:disabled,.form-control[readonly],.form-select:disabled {background:var(--mv-surface-1);color:var(--mv-text-muted);opacity:1}
++.mv-field {margin-bottom:22px}.mv-error {color:var(--mv-danger);font-size:12px;margin:6px 0 0;min-height:0}.mv-error:empty {display:none}
++.mv-field.is-invalid :is(input,textarea,select) {border-color:var(--mv-danger)}.mv-input-icon .mv-input {padding-left:38px}
++.mv-table-toolbar,.mv-pagination {background:transparent;padding:16px 0;border-color:var(--mv-border)}
++.mv-table,.stock-table,.items-table,.table {color:var(--mv-text);font-size:14px;--bs-table-bg:transparent;--bs-table-color:var(--mv-text);--bs-table-border-color:var(--mv-border);width:100%}
++.mv-table th,.stock-table th,.items-table th {font-size:12px;text-transform:none;letter-spacing:0;color:var(--mv-text-muted);font-weight:500;padding:13px 12px;background:var(--mv-surface-1);border-bottom:1px solid var(--mv-border-strong)}
++.mv-table td,.stock-table td,.items-table td {padding:16px 12px;border-bottom:1px solid var(--mv-border);overflow-wrap:anywhere;vertical-align:middle}
++.mv-table tbody tr:hover,.stock-table tbody tr:hover {background:var(--mv-surface-1)}.mv-num,.amount {font-variant-numeric:tabular-nums;text-align:right}
++.mv-table-wrap,.table-responsive {max-width:100%;overflow-x:auto}.mv-sort {min-height:24px}.mv-page-info {font-size:12px}
++.dropdown-menu,.list-group-item,.offcanvas,.modal-content {background:var(--mv-surface);color:var(--mv-text);border-color:var(--mv-border)}
++.dropdown-item {color:var(--mv-text)}.dropdown-item:hover,.list-group-item-action:hover {background:var(--mv-surface-1);color:var(--mv-text)}
++.modal-content {border-radius:6px;box-shadow:var(--mv-shadow-lg)}.modal-header,.modal-footer {background:var(--mv-surface);padding:20px 26px;border-color:var(--mv-border)}
++.modal-header .modal-title {font:500 25px 'Source Serif 4',serif}.modal-body {padding:26px}.modal-footer {background:var(--mv-surface-1);gap:10px}
++[data-theme="dark"] .btn-close {filter:invert(1)}.modal.fade .modal-dialog {transition:opacity .15s;transform:none}
++.mv-feed-item {padding:16px 0;background:transparent;border-bottom:1px solid var(--mv-border)}.mv-feed-icon {background:transparent!important;color:var(--mv-text-muted);border-radius:0}
++.mv-feed-text {font-size:14px}.mv-feed-time {font-size:12px;margin-top:6px}.mv-empty {padding:44px 20px}.mv-empty-title {font:500 18px 'Source Serif 4',serif}.mv-empty-text {font-size:13px}
++.mv-skeleton {background:var(--mv-surface-2);animation:none}.mv-chart {height:210px}.mv-toast {background:var(--mv-surface);border-radius:4px;animation:none}
++.mv-spin {display:inline-block;width:15px;height:15px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:mv-spin 1s linear infinite}@keyframes mv-spin {to {transform:rotate(360deg)}}
++/* Staff worklists are ruled queues, not floating cards. */
++.role-tabs {gap:22px;border-bottom:1px solid var(--mv-border);margin-bottom:28px}.role-tab {padding:12px 0;border-radius:0;letter-spacing:0;transition:color .15s,border-color .15s;font-weight:500}
++.role-tab.active {background:transparent;border-color:var(--mv-text);color:var(--mv-text)}
++.queue-card {display:grid;grid-template-columns:minmax(150px,1.2fr) repeat(3,minmax(130px,1fr));gap:14px;align-items:center;border:0;border-bottom:1px solid var(--mv-border);border-radius:0;background:transparent;margin:0;padding:22px 12px;transition:background-color .15s}
++.queue-card:hover,.timeline-item:hover {background:var(--mv-surface-1);transform:none;box-shadow:none}.queue-card h6,.queue-card p {margin:0;font-size:14px}
++.prescription-card,.test-card,.report-row {padding:22px 0;align-items:flex-start}.prescription-info .name,.test-info .patient {font-size:15px}.prescription-info .meta {margin-top:6px;line-height:1.6}
++.pharmacy-grid {gap:40px;grid-template-columns:minmax(0,1fr)}.lab-grid {gap:40px}.pharmacy-grid>*,.lab-grid>* {min-width:0}
++@media(min-width:1280px){.pharmacy-grid {grid-template-columns:minmax(280px,.8fr) minmax(0,1.65fr)}}
++/* Signature: server-derived stock reconciliation. */
++#dispenseModal .modal-dialog {max-width:820px;margin-left:auto;margin-right:auto}
++#dispenseModal .modal-header {border-top:5px solid var(--mv-success);padding-top:24px}
++.rx-context {display:grid;grid-template-columns:1.5fr 1fr;gap:20px;padding-bottom:23px;margin-bottom:22px;border-bottom:1px solid var(--mv-border)}
++.rx-context p {margin:0;font-size:16px}.rx-context small {display:block;color:var(--mv-text-muted);font-size:12px;margin-bottom:5px}
++.rx-context .rx-patient {font:500 25px 'Source Serif 4',serif}.rx-reference {color:var(--mv-text-muted);font-size:13px;margin:0 0 20px}
++.rx-reconciliation {width:100%;border-collapse:collapse}.rx-reconciliation th {font-size:12px;font-weight:500;color:var(--mv-text-muted);padding:12px;text-align:right;border-bottom:1px solid var(--mv-border-strong);background:var(--mv-surface-1)}
++.rx-reconciliation th:first-child,.rx-reconciliation td:first-child {text-align:left}.rx-reconciliation td {padding:18px 12px;text-align:right;border-bottom:1px solid var(--mv-border);font-size:19px;font-weight:500;vertical-align:middle}
++.rx-reconciliation td:first-child {font-size:14px}.rx-reconciliation small {display:block;color:var(--mv-text-muted);font-size:12px;font-weight:400;margin-top:5px}.rx-reconciliation .rx-after {background:var(--mv-success-soft);color:var(--mv-success);font-weight:600}
++.rx-reconciliation .rx-short {background:var(--mv-danger-soft);color:var(--mv-danger)}
++.rx-safety {padding:14px 16px;background:var(--mv-success-soft);color:var(--mv-success);margin-top:20px;display:flex;gap:10px;align-items:center;font-size:13px;border-left:3px solid currentColor}
++.rx-safety.is-error {background:var(--mv-danger-soft);color:var(--mv-danger)}.rx-preview {background:transparent;padding:0;margin:0;border-radius:0}
++.dispense-success {background:var(--mv-success-soft);border-radius:3px;border:0;border-left:3px solid var(--mv-success);color:var(--mv-success);padding:18px 20px;margin:0 0 28px}
++.stock-diff {font-family:inherit}.dispense-success-text {color:var(--mv-success)}
++/* Patient orientation and genuine four-step sequence. */
++.hero {background:transparent;border-radius:0;border:0;padding:0 0 28px;color:var(--mv-text);margin:0}.hero h2 {font:500 27px 'Source Serif 4',serif;color:var(--mv-text)}.hero p {font-size:14px;color:var(--mv-text-muted);opacity:1}
++.wizard-progress {margin-bottom:28px;gap:8px}.wizard-progress::before {display:none}.wizard-step {align-items:flex-start;border-top:2px solid var(--mv-border);padding-top:12px;gap:3px}.wizard-step.active {border-color:var(--mv-primary)}.wizard-step.completed {border-color:var(--mv-success)}
++.wizard-step-num {border:0;border-radius:0;width:24px;height:24px;background:transparent;color:var(--mv-text-muted);font-size:13px}.wizard-step.active .wizard-step-num,.wizard-step.completed .wizard-step-num {background:transparent;color:var(--mv-text)}
++.wizard-step-label {margin:2px 0 0;text-align:left;font-size:12px}.dept-card {text-align:left;padding:20px;border:1px solid var(--mv-border-strong);border-radius:4px}.dept-card:hover {transform:none;background:var(--mv-surface-1)}
++.dept-card h6 {font-size:15px;margin-top:16px}.dept-card i {font-size:18px!important;color:var(--mv-text-muted)}
++.dept-card.selected,.doctor-card.selected,.calendar-day.selected,.time-slot.selected {background:var(--mv-primary-soft);border-color:var(--mv-primary);color:var(--mv-text);box-shadow:inset 0 0 0 1px var(--mv-primary)}
++.dept-card.selected h6,.doctor-card.selected h6,.dept-card.selected i {color:var(--mv-text)}.doctor-card {border:1px solid var(--mv-border);border-radius:3px;padding:16px}.doctor-avatar {background:var(--mv-primary-soft);color:var(--mv-text);border-radius:4px}
++.calendar-day {aspect-ratio:auto;min-height:62px;flex-direction:column;gap:4px}.calendar-day small {font-size:10px;color:var(--mv-text-muted)}.time-slot {min-height:44px}
++.patient-records {margin-top:34px}.patient-records h2 {padding-bottom:14px;border-bottom:2px solid var(--mv-text)}.patient-records article {padding:18px 0;border-bottom:1px solid var(--mv-border)}
++/* Clinical schedule and prescription remain documents. */
++.timeline {max-width:none;margin:0}.timeline-item {border:0;border-bottom:1px solid var(--mv-border);border-radius:0;padding:22px 12px;margin:0;background:transparent;gap:28px}.timeline-time {min-width:90px;font-size:14px}.timeline-content h5 {font-size:16px}
++.rx-builder {padding:22px 0;background:transparent;border-radius:0;border-top:2px solid var(--mv-text)}.rx-builder th {text-transform:none!important;letter-spacing:0!important}.rx-history {margin-bottom:24px;border-bottom:1px solid var(--mv-border);padding-bottom:20px}.rx-history p {font-size:13px}
++/* Wards: recognizable bed units; no emergency color for ordinary occupancy. */
++.ward-grid-hero {background:transparent;border:0;box-shadow:none;border-radius:0;padding:24px 0;gap:14px;grid-template-columns:repeat(auto-fill,minmax(85px,1fr))}
++.bed-tile-hero,.bed-tile {font-family:inherit;border-radius:4px;box-shadow:none!important;transition:background-color .15s,border-color .15s}
++.bed-tile-hero:hover,.bed-tile:hover {transform:none}.bed-tile-hero.available,.bed-tile.available,.bed-tile.is-available {background:var(--mv-success-soft);color:var(--mv-success);border:1px solid var(--mv-success)}
++.bed-tile-hero.occupied,.bed-tile.occupied,.bed-tile.is-occupied {background:var(--mv-surface-2);color:var(--mv-text);border:1px solid var(--mv-border-strong)}
++.bed-tile.is-occupied .bed-status-badge {background:var(--mv-text-muted)}.bed-grid {padding:20px 0}.ward-header {padding:16px 0;border-top:2px solid var(--mv-text)}.bed-patient {white-space:normal;overflow:visible}.bed-tile-hero .bed-status {font-size:11px}
++/* Inventory and fleet: repeated bounded objects, no universal card styling. */
++.blood-grid {grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr));gap:24px}.blood-card {border-radius:4px;box-shadow:none;padding:22px;border-top:3px solid var(--mv-border-strong);background:var(--mv-surface)}
++.blood-icon {border-radius:0;background:transparent;color:var(--mv-text);font-size:30px;font-weight:500;min-width:60px}.blood-card-body h5 {font-size:14px}.blood-card-body p {font-size:12px}.units-bar {border-radius:0;height:5px}.units-text {font-size:14px}
++.ambulance-grid {grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:28px}.ambulance-card {border:0;border-top:2px solid var(--mv-text);border-radius:0;background:transparent;padding:22px 0;box-shadow:none}.ambulance-icon {background:var(--mv-surface-2);color:var(--mv-text);border-radius:4px;width:44px;height:44px}.ambulance-card>.mv-btn {width:auto!important}
++/* Identity sheet, not a gradient profile banner. */
++.profile-header {background:transparent;color:var(--mv-text);border-radius:0;padding:0 0 28px;border-bottom:1px solid var(--mv-border);gap:22px}.profile-avatar {width:72px;height:72px;font-size:24px;border:1px solid var(--mv-border);border-radius:4px;background:var(--mv-surface-2);color:var(--mv-text);flex-shrink:0}.profile-info h3 {font:500 28px 'Source Serif 4',serif}.profile-info p {opacity:1;overflow-wrap:anywhere}
++.info-grid {gap:0;max-width:1000px}.info-item {border:0;border-left:1px solid var(--mv-border);border-radius:0;padding:10px 22px;background:transparent}.info-item label {text-transform:none;letter-spacing:0;font-size:13px}.info-item .value {overflow-wrap:anywhere}.password-form {margin-top:40px}
++/* Bills: literal ledger, with printable document identity. */
++.invoice-container {background:var(--mv-surface);border:1px solid var(--mv-border);border-radius:0;padding:38px;max-width:900px}.invoice-letterhead {text-align:left;border-bottom:2px solid var(--mv-text);padding-bottom:26px}.invoice-letterhead h1 {font:500 31px 'Source Serif 4',serif;color:var(--mv-text)}
++.invoice-meta-item strong {text-transform:none;letter-spacing:0;font-size:12px}.items-table .amount,.invoice-total-line.grand {font-family:'IBM Plex Sans',sans-serif}.paid-stamp {position:static;display:inline-block;transform:none;font:500 12px 'IBM Plex Sans',sans-serif;border:1px solid var(--mv-success);border-radius:2px;padding:5px 12px;opacity:1;margin-top:12px}.invoice-total-line.grand {font-size:22px;color:var(--mv-text)}.invoice-footer {text-align:left;font-size:12px}
++/* Sign-in is an entry to the record, not a marketing landing page. */
++.mv-login {display:flex;flex-direction:column;min-height:100vh;background:var(--mv-bg)}.mv-login-art {background:transparent;padding:28px 40px;border-bottom:1px solid var(--mv-border);display:block;color:var(--mv-text);min-height:0}.mv-login-art::before,.mv-login-art::after {display:none}.mv-login-brand {margin:0;gap:12px;color:var(--mv-text)}.mv-login-brand-name {font:500 28px 'Source Serif 4',serif;letter-spacing:0;color:var(--mv-text)}.mv-login-headline,.mv-login-lede,.mv-login-points,.mv-login-foot {display:none}
++.mv-login-panel {flex:1;display:flex;align-items:center;justify-content:center;padding:44px 24px;background:transparent}.mv-login-card {width:100%;max-width:440px;padding:0;box-shadow:none;border:0;background:transparent;animation:none}.mv-login-title {font-size:38px;margin:0 0 10px}.mv-login-sub {font-size:14px;color:var(--mv-text-muted)}.mv-login-card>.mb-3 {margin-bottom:30px!important}
++.mv-login-alert {border-radius:3px;background:var(--mv-danger-soft);color:var(--mv-danger)}.mv-demo {margin-top:30px;border-top:1px solid var(--mv-border);padding-top:22px}.mv-demo-label {font-size:12px;color:var(--mv-text-muted);letter-spacing:0;text-transform:none}.mv-demo-grid {display:flex;flex-wrap:wrap;gap:8px}.mv-demo-btn {border:1px solid var(--mv-border);background:transparent;border-radius:3px;color:var(--mv-text-muted);font:450 12px 'IBM Plex Sans',sans-serif;padding:8px 11px;display:flex;gap:6px;align-items:center;transition:background-color .15s}.mv-demo-btn:hover {background:var(--mv-surface-2);color:var(--mv-text);transform:none}.mv-shake {animation:none}
++@media(max-width:991px){.mv-page{padding:28px 24px 40px}.mv-topbar{padding:0 24px}.mv-topbar-context{display:none}.mv-sidebar{width:260px}.queue-card{grid-template-columns:1fr 1fr}.mv-page-title{font-size:30px}.mv-nav-open .mv-sidebar{z-index:1040}.mv-backdrop{z-index:1030}}
++@media(max-width:575px){
++  .mv-page{padding:24px 18px 36px}.mv-page-head{align-items:flex-start;gap:18px;padding-bottom:22px}.mv-page-title{font-size:28px}.mv-page-sub{font-size:13px}.mv-page-actions{width:100%}.mv-topbar{padding:0 16px}.mv-userchip-meta{display:none}.mv-stat{padding:6px 14px 14px}.mv-stat-value{font-size:27px}.mv-stat-icon{display:none}
++  .mv-card-head,.ward-header{gap:12px;align-items:flex-start;flex-wrap:wrap}.modal-dialog,#dispenseModal .modal-dialog{margin:10px;max-width:calc(100% - 20px)}.modal-header,.modal-body,.modal-footer{padding:20px}.modal-header .modal-title{font-size:23px}.queue-card{grid-template-columns:1fr;padding:18px 0;gap:5px}.queue-card h6{margin-bottom:7px}.role-tabs{gap:16px}.role-tab{font-size:12px}
++  .rx-context{grid-template-columns:1fr;gap:12px}.rx-context .rx-patient{font-size:23px}.rx-reconciliation th,.rx-reconciliation td{padding:12px 6px;font-size:15px}.rx-reconciliation th{font-size:10px}.rx-reconciliation td:first-child{font-size:12px;max-width:120px}.rx-reconciliation small{font-size:10px}.rx-safety{font-size:12px}.rx-context small{margin-bottom:2px}
++  .dept-grid{grid-template-columns:1fr 1fr}.dept-card{padding:14px}.dept-card h6{font-size:13px}.calendar-grid{gap:5px}.calendar-day{min-height:54px;font-size:12px}.wizard-step-label{font-size:10px}.wizard-step{min-width:0}
++  .test-card,.report-row,.prescription-card{flex-wrap:wrap;gap:14px}.report-actions{flex-wrap:wrap}.profile-header{align-items:flex-start;gap:16px}.profile-info h3{font-size:23px}.profile-avatar{width:52px;height:52px;font-size:19px}.info-grid{grid-template-columns:1fr}.info-item{padding:16px 0;border-left:0;border-bottom:1px solid var(--mv-border)}
++  .invoice-container{padding:22px 16px}.invoice-letterhead h1{font-size:25px}.invoice-meta{gap:20px}.invoice-meta-item p{font-size:14px}.invoice-total-line{gap:24px}.invoice-total-line.grand{font-size:19px}.items-table th,.items-table td{padding:12px 6px;font-size:12px}.mv-login-art{padding:22px}.mv-login-panel{align-items:flex-start;padding-top:36px}.mv-login-title{font-size:32px}
++  /* Tables become labelled rows without hiding quantities or actions. */
++  .mv-table thead,.stock-table thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
++  .mv-table,.mv-table tbody,.stock-table,.stock-table tbody{display:block;width:100%}.mv-table tr,.stock-table tr{display:block;padding:14px 0;border-bottom:1px solid var(--mv-border)}
++  .mv-table td,.stock-table td{display:flex;justify-content:space-between;align-items:center;gap:18px;text-align:right;border:0;padding:6px 0;font-size:13px;min-width:0}.mv-table td::before,.stock-table td::before{content:attr(data-label);font-size:12px;color:var(--mv-text-muted);text-align:left;flex:0 0 90px}.mv-table td>*{min-width:0}
++  .rx-builder table,.rx-builder tbody,.rx-builder tr,.rx-builder td{display:block;width:100%!important}.rx-builder thead{display:none}.rx-builder td{padding:6px 0!important}.rx-builder td::before{content:attr(data-label);display:block;margin-bottom:5px;font-size:12px;color:var(--mv-text-muted)}.rx-builder tr{padding:12px 0;border-bottom:1px solid var(--mv-border)}
++}
++@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
++@media print {
++  :root,[data-theme="dark"]{color-scheme:light;--mv-bg:#fff;--mv-surface:#fff;--mv-surface-1:#fff;--mv-text:#000;--mv-text-muted:#333;--mv-primary:#000;--mv-border:#bbb;--mv-success:#315C45}
++  body{background:#fff!important;color:#000!important;font-size:11pt}.mv-sidebar,.mv-topbar,.mv-backdrop,.mv-page-actions,.mv-footer,.mv-toasts,.mv-skip,.mv-btn,.btn,.btn-close,.modal-footer{display:none!important}.mv-main{margin:0!important}.mv-page{padding:0!important;max-width:none}.mv-page-head{display:none}.invoice-container{border:0;padding:0;max-width:100%;background:white}.invoice-letterhead{break-after:avoid}.items-table tr,.invoice-meta-item,.invoice-total{break-inside:avoid}.items-table th,.items-table td{color:#000;background:#fff}.modal-backdrop{display:none!important}body.modal-open{overflow:visible!important;padding:0!important}#viewReportModal{position:static!important;overflow:visible!important}#viewReportModal .modal-dialog{max-width:100%;margin:0;transform:none}#viewReportModal .modal-content{box-shadow:none;border:0}#viewReportModal .modal-body{overflow:visible;max-height:none}.modal{height:auto!important}@page{size:A4;margin:14mm}
++}diff --git a/06_Application/public/assets/js/dispense-record.js b/06_Application/public/assets/js/dispense-record.js
+new file mode 100644
+--- /dev/null
++++ b/06_Application/public/assets/js/dispense-record.js
+@@ -0,0 +1,14 @@
++(function () {
++    // Presentation only: aggregate requirements and projected stock come from
++    // the existing item endpoint, matched to the database trigger calculation.
++    MV.dispenseRecord = function (rx, items) {
++        const medicines=[...new Map(items.map(it=>[it.medicine_id,it])).values()];
++        const shortage=medicines.some(it=>Number(it.stock_after)<0);
++        const html='<p class="rx-reference" data-testid="dispense-prescription-reference">Prescription #'+rx.prescription_id+' · Stock reconciliation</p>'+
++          '<div class="rx-context"><div><small>Patient</small><p class="rx-patient" data-testid="dispense-patient-name">'+MV.esc(rx.patient_name)+'</p></div><div><small>Prescribed by</small><p>'+MV.esc(rx.doctor_name)+'</p></div></div>'+
++          '<table class="rx-reconciliation" data-testid="dispense-stock-table"><caption class="visually-hidden">Stock consequence by medicine</caption><thead><tr><th scope="col">Medicine</th><th scope="col">In stock</th><th scope="col">To dispense</th><th scope="col">Remaining</th></tr></thead><tbody>'+
++          medicines.map(it=>'<tr data-testid="dispense-medicine-'+it.medicine_id+'"><td>'+MV.esc(it.medicine_name)+'<small>'+items.filter(x=>x.medicine_id===it.medicine_id).map(x=>MV.esc(x.dosage||'Not specified')+' · '+MV.esc(x.duration_days)+' days · '+x.quantity+' units').join('<br>')+'</small></td><td>'+it.current_stock+'</td><td>'+it.required_quantity+'</td><td class="rx-after '+(Number(it.stock_after)<0?'rx-short':'')+'">'+it.stock_after+'</td></tr>').join('')+'</tbody></table>'+
++          '<div class="rx-safety '+(shortage||!items.length?'is-error':'')+'" role="status" data-testid="dispense-stock-validation">'+MV.icon(shortage?'triangle-alert':'shield')+'<span>'+(shortage?'Insufficient stock. This prescription cannot be dispensed.':!items.length?'No medicine items recorded.':'Stock is sufficient. Quantities will be checked again at confirmation.')+'</span></div>';
++        return {html,canDispense:items.length>0&&!shortage};
++    };
++})();diff --git a/06_Application/public/assets/js/mv-core.js b/06_Application/public/assets/js/mv-core.js
+--- a/06_Application/public/assets/js/mv-core.js
++++ b/06_Application/public/assets/js/mv-core.js
+@@ -61,11 +61,12 @@
+ 
+     // Font Awesome icons — no post-processing needed, render inline
+     MV.icons = function (root) {
+-        // No-op for Font Awesome (icons render immediately)
++        if (window.lucide) window.lucide.createIcons();
+     };
+ 
+     MV.icon = function (name, cls) {
+-        return '<i class="fas fa-' + MV.esc(name) + (cls ? ' ' + MV.esc(cls) : '') + '"></i>';
++        const aliases = { 'x': 'xmark', 'eye-off': 'eye-slash', 'refresh-cw': 'arrows-rotate', 'bed-double': 'bed', 'user-round': 'user', 'heart-handshake': 'hand-holding-heart', 'flask-conical': 'flask', 'pill': 'pills', 'circle-alert': 'circle-exclamation', 'alert-circle': 'circle-exclamation', 'triangle-alert': 'triangle-exclamation', 'file-check': 'file-circle-check', 'package': 'box', 'desk': 'bell-concierge', 'file-text': 'file-lines', 'calendar-clock': 'calendar', 'circle-dashed': 'circle-half-stroke', 'siren': 'truck-medical' };
++        return '<i aria-hidden="true" class="fas fa-' + MV.esc(aliases[name] || name) + (cls ? ' ' + MV.esc(cls) : '') + '"></i>';
+     };
+ 
+     /* ============================================================== api */
+@@ -86,7 +87,7 @@
+ 
+         let res;
+         try {
+-            res = await fetch(path, init);
++            res = await fetch((window.MV_API_BASE || '') + path, init);
+         } catch (netErr) {
+             const err = new Error('Could not reach the server. Check your connection.');
+             err.status = 0;
+@@ -131,7 +132,7 @@
+ 
+     MV.toast = function (opts) {
+         const cfg = typeof opts === 'string' ? { title: opts } : (opts || {});
+-        const kind = cfg.kind || 'success';
++        const kind = cfg.kind || cfg.type || 'success';
+         const host = toastHost();
+ 
+         const node = MV.el('div', {
+@@ -141,7 +142,7 @@
+         }, [
+             MV.el('span', { class: 'mv-toast-icon', html: MV.icon(TOAST_ICON[kind] || 'info') }),
+             MV.el('div', { class: 'mv-toast-body' }, [
+-                MV.el('div', { class: 'mv-toast-title', text: cfg.title || '' }),
++                MV.el('div', { class: 'mv-toast-title', text: cfg.title || cfg.message || '' }),
+                 cfg.text ? MV.el('div', { class: 'mv-toast-text', html: cfg.html ? cfg.text : MV.esc(cfg.text) }) : null
+             ]),
+             MV.el('button', {
+@@ -477,6 +478,15 @@
+             '</div>';
+     };
+ 
++    // Original pages use both the interactive DataTable and a simple table.
++    MV.table = function (cfg) {
++        return '<div class="mv-table-wrap"><table class="mv-table"><thead><tr>' +
++            cfg.columns.map(c => '<th scope="col">' + MV.esc(c) + '</th>').join('') +
++            '</tr></thead><tbody>' + cfg.rows.map(row => '<tr>' + row.map((cell, i) =>
++                '<td data-label="' + MV.esc(cfg.columns[i]) + '">' + cell + '</td>').join('') + '</tr>').join('') +
++            '</tbody></table></div>';
++    };
++
+     /* ========================================================= DataTable */
+     /**
+      * Wraps a container in a full table experience: toolbar search, sortable
+@@ -508,7 +518,7 @@
+         const uid = 'mvdt-' + Math.random().toString(36).slice(2, 8);
+ 
+         mount.innerHTML =
+-            '<div class="mv-card">' +
++            '<div class="mv-data-record">' +
+               '<div class="mv-table-toolbar">' +
+                 '<div class="mv-input-icon">' +
+                   MV.icon('search') +
+diff --git a/06_Application/public/assets/js/mv-shell.js b/06_Application/public/assets/js/mv-shell.js
+--- a/06_Application/public/assets/js/mv-shell.js
++++ b/06_Application/public/assets/js/mv-shell.js
+@@ -1,7 +1,7 @@
+ /* =====================================================================
+    MediVault DS -- app shell
+ 
+-   Renders the dark sidebar + sticky topbar into any page that has
++   Renders neutral role-aware navigation and a record-context header into
+    <div id="mvShell"></div>, then hands the page its own <main> to fill.
+ 
+    The sidebar is built from NAV_BY_ROLE below, which mirrors the RBAC in
+@@ -39,7 +39,6 @@
+         ],
+         Nurse: [
+             { href: '/staff-portal.html', icon: 'bed-pulse', label: 'Staff Portal' },
+-            { href: '/bed-management.html', icon: 'bed', label: 'Beds' },
+             { href: '/blood-bank.html', icon: 'droplet', label: 'Blood Bank' }
+         ],
+         'Lab Technician': [
+@@ -103,7 +102,7 @@
+           '</a>' +
+           '<nav class="mv-nav" aria-label="Main navigation">' + navMarkup(role, activePath) + '</nav>' +
+           '<div class="mv-sidebar-foot">' +
+-            '<a class="mv-nav-link" href="/profile.html">' + MV.icon('user') + '<span>Profile</span></a>' +
++            '<a class="mv-nav-link" href="/profile.html"' + (activePath === '/profile.html' ? ' aria-current="page"' : '') + '>' + MV.icon('user') + '<span>Profile</span></a>' +
+             '<button type="button" class="mv-btn mv-btn-outline mv-btn-block mt-2" data-mv-logout>' +
+               MV.icon('sign-out-alt') + '<span>Sign out</span>' +
+             '</button>' +
+@@ -118,7 +117,9 @@
+               MV.icon('bars') +
+             '</button>' +
+ 
++            '<div class="mv-topbar-context">' + MV.icon('hospital') + '<span>MediVault / ' + MV.esc(opts.title || 'Account') + '</span></div>' +
+             '<div class="mv-topbar-right">' +
++              '<button type="button" class="mv-btn mv-btn-ghost mv-btn-icon" data-mv-theme aria-label="Toggle dark mode" aria-pressed="false">' + MV.icon('moon') + '</button>' +
+               '<div class="dropdown">' +
+                 '<button type="button" class="mv-userchip" data-bs-toggle="dropdown" aria-expanded="false">' +
+                   '<span class="mv-avatar" aria-hidden="true">' + MV.esc(MV.fmt.initials(user.name)) + '</span>' +
+@@ -172,7 +173,14 @@
+     }
+ 
+     function wireTheme(root) {
+-        // Theme handled by MV.theme
++        const btn = root.querySelector('[data-mv-theme]');
++        const paint = function () {
++            const dark = MV.theme.get() === 'dark';
++            btn.setAttribute('aria-pressed', String(dark));
++            btn.innerHTML = MV.icon(dark ? 'sun' : 'moon');
++        };
++        btn.addEventListener('click', function () { MV.theme.toggle(); paint(); });
++        paint();
+     }
+ 
+     function wireLogout(root) {
+diff --git a/06_Application/public/assets/js/reception-billing.js b/06_Application/public/assets/js/reception-billing.js
+new file mode 100644
+--- /dev/null
++++ b/06_Application/public/assets/js/reception-billing.js
+@@ -0,0 +1,45 @@
++(function () {
++    MV.receptionBilling = function (container) {
++        container.innerHTML = '<section class="mv-card"><div class="mv-card-head"><h2>Appointments & billing</h2><a class="mv-btn mv-btn-outline" href="/billing.html" data-testid="reception-all-bills">Billing ledger</a></div><div id="receptionAppointments"></div><div id="billResult" role="status" aria-live="polite" data-testid="reception-bill-result"></div></section>';
++        const table = new MV.DataTable(container.querySelector('#receptionAppointments'), {
++            columns: [
++                {key:'appointment_id',label:'Visit',render:r=>'#'+r.appointment_id},
++                {key:'patient_name',label:'Patient'}, {key:'doctor_name',label:'Doctor'},
++                {key:'appointment_date',label:'Date',render:r=>MV.fmt.date(r.appointment_date)+' · '+MV.fmt.time(r.appointment_time)},
++                {key:'status',label:'Status',render:r=>MV.badge(r.status)}
++            ],
++            fetch:()=>MV.api.get('/api/staff/receptionist/appointments'),
++            searchKeys:['patient_name','doctor_name','appointment_id'],
++            searchPlaceholder:'Find patient, doctor or visit…',
++            pageSize:10,
++            rowActions:r=>r.bill_id
++                ? '<a class="mv-btn mv-btn-outline mv-btn-sm" data-testid="appointment-'+r.appointment_id+'-view-bill" href="/billing.html?id='+r.bill_id+'">View bill #'+r.bill_id+'</a>'
++                : r.consultation_id
++                ? '<button class="mv-btn mv-btn-primary mv-btn-sm" data-generate-bill="'+r.appointment_id+'" data-testid="appointment-'+r.appointment_id+'-generate-bill">'+MV.icon('file-invoice')+'Generate Bill</button>'
++                : '<span class="text-muted" data-testid="appointment-'+r.appointment_id+'-billing-pending">Awaiting consultation</span>',
++            empty:{title:'No appointments',text:'No visits on record.'}
++        });
++        container.addEventListener('click',async event=>{
++            const button=event.target.closest('[data-generate-bill]');
++            if(!button || button.disabled) return;
++            const id=Number(button.dataset.generateBill);
++            const appointment=table.getRows().find(r=>r.appointment_id===id);
++            if(!appointment) return;
++            const confirmed=await MV.confirm({title:'Generate bill for '+appointment.patient_name+'?',message:'Visit #'+id+' · '+MV.fmt.date(appointment.appointment_date)+'. Charges will include the recorded consultation, lab tests and prescribed medicines.',confirmText:'Generate Bill',kind:'primary'});
++            if(!confirmed) return;
++            const restore=MV.pending(button,'Generating…');
++            const result=container.querySelector('#billResult');
++            result.textContent='Generating bill for visit #'+id+'…';
++            try {
++                const response=await MV.api.post('/api/staff/receptionist/generate-bill',{appointment_id:id});
++                const bill=response.bill;
++                result.innerHTML='<div class="rx-safety">'+MV.icon('circle-check')+'<span>Bill #'+bill.bill_id+' generated for '+MV.esc(appointment.patient_name)+' · '+MV.fmt.money(bill.total_amount)+'</span><a href="/billing.html?id='+bill.bill_id+'" class="mv-btn mv-btn-outline mv-btn-sm" data-testid="generated-bill-open">Open bill</a></div>';
++                MV.toast.success('Bill #'+bill.bill_id+' generated');
++                await table.reload();
++            } catch(error) {
++                result.innerHTML='<p class="text-danger" role="alert" data-testid="generate-bill-error">'+MV.esc(error.message)+'</p>';
++                MV.toast.error('Bill not generated',error.message);
++            } finally {restore();}
++        });
++    };
++})();diff --git a/06_Application/public/assets/js/record-accessibility.js b/06_Application/public/assets/js/record-accessibility.js
+new file mode 100644
+--- /dev/null
++++ b/06_Application/public/assets/js/record-accessibility.js
+@@ -0,0 +1,68 @@
++/* Shared presentation semantics for the original dynamically-rendered pages. */
++(function () {
++    const slug = s => String(s || '').replace(/([a-z])([A-Z])/g,'$1-$2').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
++    const page = slug(location.pathname.split('/').pop().replace('.html','') || 'login');
++    const ids = new Map();
++    let sequence = 0;
++    const unique = value => { const n=(ids.get(value)||0)+1; ids.set(value,n); return value+(n>1?'-'+n:''); };
++    function enrich(root) {
++        if (!root.querySelectorAll) return;
++        root.querySelectorAll('table').forEach(table => {
++            const columns = [...table.querySelectorAll('thead th')].map(th => th.textContent.trim());
++            table.querySelectorAll('tbody tr').forEach(row => [...row.children].forEach((td,i) => {
++                if (!td.dataset.label && columns[i]) td.dataset.label=columns[i];
++            }));
++        });
++        root.querySelectorAll('label:not([for])').forEach(label => {
++            const control=label.parentElement.querySelector('input:not([type=hidden]),select,textarea');
++            if (control) { if (!control.id) control.id=page+'-field-'+(++sequence); label.htmlFor=control.id; }
++        });
++        root.querySelectorAll('input:not([type=hidden]),select,textarea').forEach(control => {
++            if (control.labels?.length || control.hasAttribute('aria-label')) return;
++            const td=control.closest('td');
++            control.setAttribute('aria-label',td?.dataset.label || control.placeholder || control.name?.replace(/_/g,' ') || control.type);
++        });
++        root.querySelectorAll('.btn-close').forEach(el => el.setAttribute('aria-label','Close'));
++        root.querySelectorAll('.modal').forEach(modal => {
++            const title=modal.querySelector('.modal-title');
++            if (title && !modal.hasAttribute('aria-labelledby')) { if(!title.id) title.id=page+'-dialog-title-'+(++sequence); modal.setAttribute('aria-labelledby',title.id); }
++        });
++        root.querySelectorAll('[onclick]:not(button):not(a), .bed-tile[role=button]').forEach(el => {
++            el.setAttribute('role','button'); el.tabIndex=0;
++            if(el.matches('.dept-card,.doctor-card,.calendar-day,.time-slot')) el.setAttribute('aria-pressed',el.classList.contains('selected')?'true':'false');
++        });
++        root.querySelectorAll('.wizard-step').forEach(step => {
++            if(step.classList.contains('active')) step.setAttribute('aria-current','step'); else step.removeAttribute('aria-current');
++        });
++        root.querySelectorAll('.role-tab').forEach(tab => tab.setAttribute('aria-pressed',tab.classList.contains('active')?'true':'false'));
++        root.querySelectorAll('button,a,input,select,textarea,[role],h1,h2,h3,h4,h5,h6,p,th,td,label,small,span,dt,dd,article,[id],.mv-stat-value,.value,.name,.patient,.meta,.bed-number,.bed-patient,.bed-status,.mv-page-sub,.mv-stat-label,.mv-stat-note,.mv-toast-title,.mv-toast-text').forEach(el => {
++            if (el.dataset.testid || el.matches('script,style,svg,path,i')) return;
++            const parent=el.closest('form,.modal,article,tr,[data-bed-id],[data-rx-id]');
++            const scope=parent?.id || parent?.dataset.bedId || parent?.dataset.rxId || '';
++            const name=el.id || el.name || el.getAttribute('aria-label') || el.dataset.label || (el.matches('a,button,label,h1,h2,h3,h4,h5,h6')?el.textContent.trim().slice(0,55):'') || el.classList[0] || el.tagName;
++            el.dataset.testid=unique(page+'-'+slug(scope?scope+'-'+name:name));
++        });
++    }
++    function init() {
++        document.body.dataset.screen=page;
++        enrich(document.body);
++        const observer=new MutationObserver(records => {
++            observer.disconnect();
++            if(records.some(r=>r.type==='childList'||r.attributeName==='class')) enrich(document.body);
++            observer.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['class']});
++        });
++        observer.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['class']});
++        document.addEventListener('keydown', e => {
++            const el=e.target.closest('[role=button]:not(button):not(a)');
++            if(el && (e.key==='Enter'||e.key===' ')){e.preventDefault();el.click();}
++            if(el && ['ArrowRight','ArrowLeft','ArrowDown','ArrowUp'].includes(e.key)){
++                const siblings=[...el.parentElement.children].filter(x=>x.matches('[role=button]'));
++                if(siblings.length>1){e.preventDefault();const delta=['ArrowRight','ArrowDown'].includes(e.key)?1:-1;siblings[(siblings.indexOf(el)+delta+siblings.length)%siblings.length].focus();}
++            }
++        });
++        let lastFocus;
++        document.addEventListener('show.bs.modal',()=>{lastFocus=document.activeElement;});
++        document.addEventListener('hidden.bs.modal',()=>{if(lastFocus?.isConnected)lastFocus.focus();});
++    }
++    if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init); else init();
++})();diff --git a/06_Application/public/assets/js/theme-init.js b/06_Application/public/assets/js/theme-init.js
+new file mode 100644
+--- /dev/null
++++ b/06_Application/public/assets/js/theme-init.js
+@@ -0,0 +1,4 @@
++try {
++    const mode=localStorage.getItem('mv-theme') || (matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
++    document.documentElement.setAttribute('data-theme',mode);
++} catch (_) {}diff --git a/06_Application/public/bed-management.html b/06_Application/public/bed-management.html
+--- a/06_Application/public/bed-management.html
++++ b/06_Application/public/bed-management.html
+@@ -65,6 +65,10 @@
+ .bed-tile.is-available .bed-status-badge { background: var(--mv-success); }
+ .bed-tile.is-occupied .bed-status-badge { background: var(--mv-danger); }
+ </style>
++<link rel="stylesheet" href="/assets/css/clinical-record.css">
++<script src="/assets/js/theme-init.js"></script>
++<script src="/runtime-config.js"></script>
++<script src="/assets/js/record-accessibility.js" defer></script>
+ </head>
+ <body>
+ 
+diff --git a/06_Application/public/billing.html b/06_Application/public/billing.html
+--- a/06_Application/public/billing.html
++++ b/06_Application/public/billing.html
+@@ -161,6 +161,10 @@
+     }
+ }
+ </style>
++<link rel="stylesheet" href="/assets/css/clinical-record.css">
++<script src="/assets/js/theme-init.js"></script>
++<script src="/runtime-config.js"></script>
++<script src="/assets/js/record-accessibility.js" defer></script>
+ </head>
+ <body>
+ 
+@@ -264,8 +268,7 @@
+             let html = '<div class="invoice-container">' +
+                 '<div class="invoice-letterhead">' +
+                   '<h1>MediVault Hospital</h1>' +
+-                  '<p class="tagline">Comprehensive Healthcare Solutions</p>' +
+-                  '<p class="address">123 Medical District, City Name, State 560001 | Phone: +91 80 1234 5678</p>' +
++                  '<p class="tagline">Patient invoice · All amounts in Indian rupees</p>' +
+                   (isPaid ? '<div class="paid-stamp">PAID</div>' : '') +
+                 '</div>' +
+ 
+diff --git a/06_Application/public/blood-bank.html b/06_Application/public/blood-bank.html
+--- a/06_Application/public/blood-bank.html
++++ b/06_Application/public/blood-bank.html
+@@ -48,6 +48,10 @@
+     max-width: 600px; margin: 0 auto;
+ }
+ </style>
++<link rel="stylesheet" href="/assets/css/clinical-record.css">
++<script src="/assets/js/theme-init.js"></script>
++<script src="/runtime-config.js"></script>
++<script src="/assets/js/record-accessibility.js" defer></script>
+ </head>
+ <body>
+ 
+@@ -135,9 +139,8 @@
+             const data = Object.fromEntries(new FormData(form));
+ 
+             try {
+-                // Phase 5: POST to /api/admin/blood-bank/request → MongoDB transfusion_requests + notification
+-                // For now: success toast only
+-                MV.toast({ message: 'Blood request submitted (Phase 5: MongoDB tracking pending)', type: 'success' });
++                const result = await MV.api.post('/api/admin/blood-bank/request',data);
++                MV.toast({ message: result.message, type: 'success' });
+                 modalInst.hide();
+                 form.reset();
+             } catch (err) {
+diff --git a/06_Application/public/doctor-dashboard.html b/06_Application/public/doctor-dashboard.html
+--- a/06_Application/public/doctor-dashboard.html
++++ b/06_Application/public/doctor-dashboard.html
+@@ -85,6 +85,10 @@
+     margin-top: 12px;
+ }
+ </style>
++<link rel="stylesheet" href="/assets/css/clinical-record.css">
++<script src="/assets/js/theme-init.js"></script>
++<script src="/runtime-config.js"></script>
++<script src="/assets/js/record-accessibility.js" defer></script>
+ </head>
+ <body>
+ 
+@@ -214,6 +218,9 @@
+                   '<p style="font-size:12px;color:var(--mv-text-muted);margin:0">Appointment: ' + MV.fmt.time12(selectedAppt.appointment_time) + '</p>' +
+                 '</div>' +
+ 
++                '<section class="rx-history"><h6>Clinical history</h6>' +
++                  (history.records.length ? history.records.map(r=>'<p>'+MV.fmt.date(r.created_at)+' · '+MV.esc(r.diagnosis_summary)+'</p>').join('') : '<p class="text-muted">No earlier medical records.</p>') +
++                '</section>' +
+                 '<form id="consultForm">' +
+                   '<div class="mb-3">' +
+                     '<label class="form-label">Symptoms</label>' +
+diff --git a/06_Application/public/lab.html b/06_Application/public/lab.html
+--- a/06_Application/public/lab.html
++++ b/06_Application/public/lab.html
+@@ -36,6 +36,10 @@
+ .report-info .meta { font-size: .8125rem; color: var(--mv-text-muted); }
+ .report-actions { display: flex; gap: .5rem; }
+ </style>
++<link rel="stylesheet" href="/assets/css/clinical-record.css">
++<script src="/assets/js/theme-init.js"></script>
++<script src="/runtime-config.js"></script>
++<script src="/assets/js/record-accessibility.js" defer></script>
+ </head>
+ <body>
+ 
+diff --git a/06_Application/public/login.html b/06_Application/public/login.html
+--- a/06_Application/public/login.html
++++ b/06_Application/public/login.html
+@@ -17,6 +17,10 @@
+ 
+ <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+ <link href="/assets/css/medivault.css" rel="stylesheet">
++<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
++<link rel="stylesheet" href="/assets/css/clinical-record.css">
++<script src="/runtime-config.js"></script>
++<script src="/assets/js/record-accessibility.js" defer></script>
+ </head>
+ <body>
+ 
+@@ -97,7 +101,7 @@
+                  whole point of this build is a walkthrough demo; the buttons only
+                  fill the form, they never bypass /api/auth/login. -->
+             <div class="mv-demo">
+-                <p class="mv-demo-label" id="demoLabel">Demo accounts -- click to fill</p>
++                <p class="mv-demo-label" id="demoLabel">Demonstration accounts</p>
+                 <div class="mv-demo-grid" role="group" aria-labelledby="demoLabel" id="demoGrid"></div>
+             </div>
+         </div>
+diff --git a/06_Application/public/patient-portal.html b/06_Application/public/patient-portal.html
+--- a/06_Application/public/patient-portal.html
++++ b/06_Application/public/patient-portal.html
+@@ -213,6 +213,10 @@
+     border-color: var(--mv-primary);
+ }
+ </style>
++<link rel="stylesheet" href="/assets/css/clinical-record.css">
++<script src="/assets/js/theme-init.js"></script>
++<script src="/runtime-config.js"></script>
++<script src="/assets/js/record-accessibility.js" defer></script>
+ </head>
+ <body>
+ 
+@@ -258,8 +262,8 @@
+     (async function init() {
+         const ctx = await MV.shell.mount({
+             roles: ['Patient'],
+-            title: 'Home',
+-            subtitle: 'Patient Portal'
++            title: 'Your care',
++            subtitle: 'Appointments and personal health records'
+         });
+ 
+         ctx.actions.innerHTML =
+@@ -268,10 +272,6 @@
+             '</button>';
+ 
+         ctx.content.innerHTML =
+-            '<div class="hero">' +
+-              '<h2>Welcome back!</h2>' +
+-              '<p>Manage your appointments and health records</p>' +
+-            '</div>' +
+             '<div class="row g-3 mb-3">' +
+               '<div class="col-md-4">' +
+                 '<div class="mv-stat">' +
+@@ -292,6 +292,8 @@
+                 '</div>' +
+               '</div>' +
+             '</div>' +
++            '<section class="patient-records"><h2>Your bills</h2><div id="patientBills" data-testid="patient-bills-view"></div></section>' +
++            '<section class="patient-records"><h2>Medical records</h2><div id="patientRecords"></div></section>' +
+             '<div class="mv-footer">' +
+               'MediVault — Hospital Management System | DBMS Project by Kris Johnson • Roll No. 2024XXXX' +
+             '</div>';
+@@ -322,8 +324,13 @@
+                 : 'None';
+             document.getElementById('recordCount').textContent = summary.record_count || 0;
+             document.getElementById('billCount').textContent = summary.pending_bills || 0;
++            const [bills,records] = await Promise.all([MV.api.get('/api/patient/bills'),MV.api.get('/api/patient/records')]);
++            document.getElementById('patientBills').innerHTML = bills.length ? MV.table({columns:['Bill','Date','Amount','Status',''],rows:bills.map(b=>[
++                '#'+b.bill_id,MV.fmt.date(b.bill_date),MV.fmt.money(b.total_amount),MV.badge(b.payment_status),'<a class="mv-btn mv-btn-outline mv-btn-sm" data-testid="patient-view-bill-'+b.bill_id+'" href="/billing.html?id='+b.bill_id+'">View bill</a>'
++            ])}) : '<p class="text-muted">No bills on record.</p>';
++            document.getElementById('patientRecords').innerHTML = records.length ? records.map(r=>'<article><small class="text-muted">'+MV.fmt.date(r.created_at)+'</small><p class="mb-0">'+MV.esc(r.diagnosis_summary)+'</p></article>').join('') : '<p class="text-muted">No medical records on file.</p>';
+         } catch (err) {
+-            // Silent fail
++            MV.toast.error('Could not load your records',err.message);
+         }
+     }
+ 
+@@ -342,6 +349,7 @@
+         }
+ 
+         if (wizardStep === 3) {
++            const restore = MV.pending(document.getElementById('wizardNext'),'Booking…');
+             try {
+                 await MV.api.post('/api/patient/book-appointment', bookingData);
+                 MV.toast.success('Appointment booked');
+@@ -349,6 +357,8 @@
+                 loadHome();
+             } catch (err) {
+                 MV.toast.error('Booking failed', err.message);
++            } finally {
++                restore();
+             }
+             return;
+         }
+@@ -406,6 +416,7 @@
+     }
+ 
+     window.selectDept = function (id) {
++        if (bookingData.department_id !== id) { bookingData.doctor_id=null; bookingData.appointment_time=null; }
+         bookingData.department_id = id;
+         document.querySelectorAll('.dept-card').forEach(function (el) { el.classList.remove('selected'); });
+         event.currentTarget.classList.add('selected');
+@@ -435,6 +446,7 @@
+     }
+ 
+     window.selectDoctor = function (id) {
++        if (bookingData.doctor_id !== id) bookingData.appointment_time=null;
+         bookingData.doctor_id = id;
+         document.querySelectorAll('.doctor-card').forEach(function (el) { el.classList.remove('selected'); });
+         event.currentTarget.classList.add('selected');
+@@ -455,13 +467,14 @@
+                   const dateStr = MV.fmt.isoDate(d);
+                   const sel = dateStr === bookingData.appointment_date ? 'selected' : '';
+                   return '<div class="calendar-day ' + sel + '" onclick="selectDate(\'' + dateStr + '\')">'
+-                      + d.getDate() +
++                      + d.getDate() + '<small>' + d.toLocaleDateString('en-IN',{month:'short',weekday:'short'}) + '</small>' +
+                     '</div>';
+               }).join('') +
+             '</div>';
+     }
+ 
+     window.selectDate = function (date) {
++        if (bookingData.appointment_date !== date) bookingData.appointment_time=null;
+         bookingData.appointment_date = date;
+         document.querySelectorAll('.calendar-day').forEach(function (el) { el.classList.remove('selected'); });
+         event.currentTarget.classList.add('selected');
+diff --git a/06_Application/public/pharmacy.html b/06_Application/public/pharmacy.html
+--- a/06_Application/public/pharmacy.html
++++ b/06_Application/public/pharmacy.html
+@@ -56,6 +56,10 @@
+     color: var(--mv-success);
+ }
+ </style>
++<link rel="stylesheet" href="/assets/css/clinical-record.css">
++<script src="/assets/js/theme-init.js"></script>
++<script src="/runtime-config.js"></script>
++<script src="/assets/js/record-accessibility.js" defer></script>
+ </head>
+ <body>
+ 
+@@ -66,7 +70,7 @@
+     <div class="modal-dialog">
+         <div class="modal-content">
+             <div class="modal-header">
+-                <h5 class="modal-title">Dispense Prescription</h5>
++                <h5 class="modal-title">Confirm dispensing</h5>
+                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+             </div>
+             <div class="modal-body" id="dispenseModalBody"></div>
+@@ -81,6 +85,7 @@
+ <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+ <script src="/assets/js/mv-core.js"></script>
+ <script src="/assets/js/mv-shell.js"></script>
++<script src="/assets/js/dispense-record.js"></script>
+ <script>
+ (function () {
+     'use strict';
+@@ -255,6 +260,7 @@
+             '</div>';
+ 
+         dispenseModalInstance.show();
++        document.getElementById('confirmDispenseBtn').disabled = true;
+ 
+         try {
+             const items = await MV.api.get('/api/staff/pharmacist/prescription-items/' + rx.prescription_id);
+@@ -263,21 +269,9 @@
+                 return;
+             }
+ 
+-            body.innerHTML = '<p><strong>Patient:</strong> ' + MV.esc(rx.patient_name) + '</p>' +
+-                '<p><strong>Doctor:</strong> Dr. ' + MV.esc(rx.doctor_name) + '</p>' +
+-                '<hr>' +
+-                '<h6>Items:</h6>' +
+-                '<ul class="list-unstyled mb-0">' +
+-                  items.map(function (it) {
+-                      return '<li class="mb-2">' +
+-                          '<strong>' + MV.esc(it.medicine_name) + '</strong><br>' +
+-                          '<small class="text-muted">Dosage: ' + MV.esc(it.dosage || '--') + ' · ' +
+-                          'Duration: ' + (it.duration_days || '--') + ' days · ' +
+-                          'Qty: ' + it.quantity + ' (current stock: ' + it.current_stock + ')' +
+-                          '</small>' +
+-                        '</li>';
+-                  }).join('') +
+-                '</ul>';
++            const preview = MV.dispenseRecord(rx, items);
++            body.innerHTML = preview.html;
++            document.getElementById('confirmDispenseBtn').disabled = !preview.canDispense;
+ 
+         } catch (err) {
+             body.innerHTML = '<p class="text-danger mb-0">Failed to load items</p>';
+@@ -298,11 +292,12 @@
+ 
+             await MV.api.post('/api/staff/pharmacist/dispense/' + activeRx.prescription_id);
+ 
+-            // Show stock update inline (hero element)
+-            const diffs = items.map(function (it) {
++            // Read actual post-trigger stock; never present guessed subtraction.
++            const stockAfter = await MV.api.get('/api/staff/pharmacist/prescription-items/' + activeRx.prescription_id);
++            const diffs = [...new Map(items.map(it=>[it.medicine_id,it])).values()].map(function (it) {
+                 const before = stockBefore[it.medicine_id];
+-                const after = before - it.quantity;
+-                return '<span class="stock-diff">' + it.medicine_name + ': ' + before + ' → ' + after + '</span>';
++                const after = stockAfter.find(row=>row.medicine_id===it.medicine_id).current_stock;
++                return '<span class="stock-diff">' + MV.esc(it.medicine_name) + ': ' + before + ' before · ' + after + ' remaining</span>';
+             }).join('<br>');
+ 
+             const alert = document.getElementById('successAlert');
+diff --git a/06_Application/public/profile.html b/06_Application/public/profile.html
+--- a/06_Application/public/profile.html
++++ b/06_Application/public/profile.html
+@@ -31,6 +31,10 @@
+ .info-item .value { font-size: 1rem; font-weight: 600; color: var(--mv-text); }
+ .password-form { max-width: 500px; }
+ </style>
++<link rel="stylesheet" href="/assets/css/clinical-record.css">
++<script src="/assets/js/theme-init.js"></script>
++<script src="/runtime-config.js"></script>
++<script src="/assets/js/record-accessibility.js" defer></script>
+ </head>
+ <body>
+ 
+diff --git a/06_Application/public/staff-portal.html b/06_Application/public/staff-portal.html
+--- a/06_Application/public/staff-portal.html
++++ b/06_Application/public/staff-portal.html
+@@ -53,6 +53,10 @@
+ .rx-preview-item .stock { color: var(--mv-text-muted); }
+ .rx-preview-item .stock.low { color: var(--mv-danger); font-weight: 600; }
+ </style>
++<link rel="stylesheet" href="/assets/css/clinical-record.css">
++<script src="/assets/js/theme-init.js"></script>
++<script src="/runtime-config.js"></script>
++<script src="/assets/js/record-accessibility.js" defer></script>
+ </head>
+ <body>
+ 
+@@ -61,6 +65,8 @@
+ <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+ <script src="/assets/js/mv-core.js"></script>
+ <script src="/assets/js/mv-shell.js"></script>
++<script src="/assets/js/reception-billing.js"></script>
++<script src="/assets/js/dispense-record.js"></script>
+ <script>
+ (function () {
+     'use strict';
+@@ -91,10 +97,12 @@
+         const ctx = await MV.shell.mount({
+             roles: ['Admin', 'Nurse', 'Lab Technician', 'Pharmacist', 'Receptionist'],
+             title: 'Staff Portal',
+-            subtitle: 'Role-based dashboard'
++            subtitle: 'Appointments, care and clinical services'
+         });
+ 
+         userRole = ctx.user.role;
++        const roleTitles = {'Pharmacist':'Dispensing queue','Receptionist':'Reception','Nurse':'Ward board','Lab Technician':'Laboratory queue'};
++        document.querySelector('.mv-page-title').textContent = roleTitles[userRole] || 'Staff portal';
+ 
+         // Role tabs
+         const tabs = document.createElement('div');
+@@ -103,7 +111,7 @@
+             (userRole === 'Nurse' ? '<button class="role-tab active" data-view="nurse"><i class="fa-solid fa-bed me-1"></i>Ward Board</button>' : '') +
+             (userRole === 'Lab Technician' ? '<button class="role-tab active" data-view="lab-queue"><i class="fa-solid fa-flask me-1"></i>Test Queue</button><button class="role-tab" data-view="lab-completed"><i class="fa-solid fa-check-double me-1"></i>Completed</button>' : '') +
+             (userRole === 'Pharmacist' ? '<button class="role-tab active" data-view="pharma-queue"><i class="fa-solid fa-pills me-1"></i>Prescription Queue</button><button class="role-tab" data-view="pharma-inventory"><i class="fa-solid fa-boxes-stacked me-1"></i>Inventory</button>' : '') +
+-            (userRole === 'Receptionist' ? '<button class="role-tab active" data-view="recept-register"><i class="fa-solid fa-user-plus me-1"></i>Register Patient</button><button class="role-tab" data-view="recept-booking"><i class="fa-solid fa-calendar-plus me-1"></i>Quick Booking</button>' : '') +
++            (userRole === 'Receptionist' ? '<button class="role-tab active" data-view="recept-billing" data-testid="reception-appointments-tab">Appointments & billing</button><button class="role-tab" data-view="recept-register">Register patient</button><button class="role-tab" data-view="recept-booking">Quick booking</button>' : '') +
+             (userRole === 'Admin' ? '<button class="role-tab active" data-view="recept-register"><i class="fa-solid fa-user-plus me-1"></i>Register Patient</button><button class="role-tab" data-view="recept-booking"><i class="fa-solid fa-calendar-plus me-1"></i>Quick Booking</button><button class="role-tab" data-view="nurse"><i class="fa-solid fa-bed me-1"></i>Ward Board</button><button class="role-tab" data-view="lab-queue"><i class="fa-solid fa-flask me-1"></i>Lab Queue</button><button class="role-tab" data-view="pharma-queue"><i class="fa-solid fa-pills me-1"></i>Pharmacy Queue</button>' : '');
+ 
+         ctx.content.insertBefore(tabs, ctx.content.firstChild);
+@@ -128,7 +136,8 @@
+         if (userRole === 'Nurse') activeView = 'nurse';
+         else if (userRole === 'Lab Technician') activeView = 'lab-queue';
+         else if (userRole === 'Pharmacist') activeView = 'pharma-queue';
+-        else if (userRole === 'Receptionist' || userRole === 'Admin') activeView = 'recept-register';
++        else if (userRole === 'Receptionist') activeView = 'recept-billing';
++        else if (userRole === 'Admin') activeView = 'recept-register';
+ 
+         renderView();
+         setInterval(function () {
+@@ -204,7 +213,7 @@
+               '<div class="modal-dialog modal-lg">' +
+                 '<div class="modal-content">' +
+                   '<div class="modal-header">' +
+-                    '<h5 class="modal-title">Dispense Prescription</h5>' +
++                    '<h5 class="modal-title">Confirm dispensing</h5>' +
+                     '<button type="button" class="btn-close" data-bs-dismiss="modal"></button>' +
+                   '</div>' +
+                   '<div class="modal-body">' +
+@@ -213,7 +222,7 @@
+                   '</div>' +
+                   '<div class="modal-footer">' +
+                     '<button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+-                    '<button type="button" class="btn btn-success" id="confirmDispense">Dispense</button>' +
++                    '<button type="button" class="mv-btn mv-btn-primary" id="confirmDispense" data-testid="staff-confirm-dispense">Confirm dispense</button>' +
+                   '</div>' +
+                 '</div>' +
+               '</div>' +
+@@ -225,14 +234,18 @@
+         document.getElementById('confirmDispense').addEventListener('click', async function () {
+             const prescriptionId = window.activePrescriptionId;
+             if (!prescriptionId) return;
+-
++            const restore = MV.pending(this, 'Dispensing…');
+             try {
+                 await MV.api.post('/api/staff/pharmacist/dispense/' + prescriptionId);
+                 MV.toast({ message: 'Prescription dispensed, stock updated', type: 'success' });
+                 dispenseModalInst.hide();
+                 loadPendingPrescriptions();
++                await loadPendingPrescriptions();
++                renderPharmaQueue();
+             } catch (err) {
+                 MV.toast({ message: err.message, type: 'danger' });
++            } finally {
++                restore();
+             }
+         });
+ 
+@@ -243,7 +256,9 @@
+         const container = document.getElementById('viewContainer');
+         if (!container) return;
+ 
+-        if (activeView === 'nurse') {
++        if (activeView === 'recept-billing') {
++            MV.receptionBilling(container);
++        } else if (activeView === 'nurse') {
+             await loadBeds();
+             container.innerHTML = '<h5 style="margin-bottom:1rem">Ward Bed Status</h5><div class="ward-board" id="wardBoard"></div>';
+             renderBeds();
+@@ -347,10 +362,10 @@
+     }
+ 
+     window.openLabResult = function (requestId, patientName, testName) {
++        document.getElementById('labResultForm').reset();
+         document.getElementById('labRequestId').value = requestId;
+         document.getElementById('labPatientName').value = patientName;
+         document.getElementById('labTestName').value = testName;
+-        document.getElementById('labResultForm').reset();
+         document.getElementById('labRequestId').value = requestId;
+         window.labModalInst.show();
+     };
+@@ -423,22 +438,10 @@
+             const items = await MV.api.get('/api/staff/pharmacist/prescription-items/' + prescriptionId);
+             const rx = pendingPrescriptions.find(function (r) { return r.prescription_id === prescriptionId; });
+ 
+-            document.getElementById('dispenseInfo').innerHTML =
+-                '<p><strong>Patient:</strong> ' + MV.esc(rx.patient_name) + '</p>'
+-                + '<p><strong>Doctor:</strong> ' + MV.esc(rx.doctor_name) + '</p>';
+-
+-            let itemsHtml = '';
+-            items.forEach(function (item) {
+-                const stockClass = item.current_stock < item.quantity ? 'low' : '';
+-                itemsHtml += '<div class="rx-preview-item">'
+-                    + '<span class="medicine">' + MV.esc(item.medicine_name) + '</span>'
+-                    + '<span>' + item.dosage + ' × ' + item.duration_days + ' days</span>'
+-                    + '<span>Qty: ' + item.quantity + '</span>'
+-                    + '<span class="stock ' + stockClass + '">Stock: ' + item.current_stock + '</span>'
+-                  + '</div>';
+-            });
+-
+-            document.getElementById('dispenseItems').innerHTML = itemsHtml;
++            document.getElementById('dispenseInfo').innerHTML = '';
++            const preview = MV.dispenseRecord(rx, items);
++            document.getElementById('dispenseItems').innerHTML = preview.html;
++            document.getElementById('confirmDispense').disabled = !preview.canDispense;
+             window.dispenseModalInst.show();
+         } catch (err) {
+             MV.toast({ message: 'Failed to load prescription items', type: 'danger' });
+@@ -475,7 +478,7 @@
+                 return [
+                     MV.esc(med.medicine_name),
+                     MV.esc(med.manufacturer),
+-                    '$' + med.unit_price.toFixed(2),
++                    MV.fmt.money(med.unit_price),
+                     stockBadge,
+                     expiryBadge
+                 ];
+@@ -525,9 +528,9 @@
+                     '<label class="form-label">Gender <span class="text-danger">*</span></label>' +
+                     '<select class="form-select" name="gender" required>' +
+                       '<option value="">Select Gender</option>' +
+-                      '<option value="Male">Male</option>' +
+-                      '<option value="Female">Female</option>' +
+-                      '<option value="Other">Other</option>' +
++                      '<option value="M">Male</option>' +
++                      '<option value="F">Female</option>' +
++                      '<option value="O">Other</option>' +
+                     '</select>' +
+                   '</div>' +
+                   '<div class="col-md-6">' +
+diff --git a/06_Application/routes/billing.js b/06_Application/routes/billing.js
+--- a/06_Application/routes/billing.js
++++ b/06_Application/routes/billing.js
+@@ -1,6 +1,8 @@
+ const express = require('express');
+ const router = express.Router();
+ const { mysqlPool } = require('../config/db');
++const { requireRole } = require('../middleware/auth');
++router.use(requireRole('Admin','Receptionist','Doctor','Patient'));
+ 
+ // Middleware: verify logged in
+ function requireAuth(req, res, next) {
+@@ -26,6 +28,9 @@
+         const params = [];
+         if (user.role === 'Patient') {
+             query += ' WHERE b.patient_id = ?';
++            params.push(user.id);
++        } else if (user.role === 'Doctor') {
++            query += ' WHERE EXISTS (SELECT 1 FROM APPOINTMENT a WHERE a.appointment_id=b.appointment_id AND a.doctor_id=?)';
+             params.push(user.id);
+         }
+         query += ' ORDER BY b.bill_date DESC LIMIT 50';
+@@ -54,7 +59,11 @@
+         // Role-based access: Patient sees only own bills, staff sees all
+         const user = req.session.user;
+         if (user.role === 'Patient' && bill.patient_id !== user.id) {
+-            return res.status(403).json({ error: 'Access denied' });
++            return res.status(404).json({ error: 'Bill not found' });
++        }
++        if (user.role === 'Doctor') {
++            const [[allowed]]=await mysqlPool.query('SELECT appointment_id FROM APPOINTMENT WHERE appointment_id=? AND doctor_id=?',[bill.appointment_id,user.id]);
++            if(!allowed) return res.status(404).json({error:'Bill not found'});
+         }
+ 
+         res.json(bill);
+@@ -66,12 +75,16 @@
+ router.get('/:billId/items', requireAuth, async (req, res) => {
+     try {
+         // Access check same as above — verify bill belongs to requester if Patient
+-        const [billCheck] = await mysqlPool.query('SELECT patient_id FROM BILL WHERE bill_id = ?', [req.params.billId]);
++        const [billCheck] = await mysqlPool.query('SELECT patient_id,appointment_id FROM BILL WHERE bill_id = ?', [req.params.billId]);
+         if (!billCheck.length) return res.status(404).json({ error: 'Bill not found' });
+ 
+         const user = req.session.user;
+         if (user.role === 'Patient' && billCheck[0].patient_id !== user.id) {
+-            return res.status(403).json({ error: 'Access denied' });
++            return res.status(404).json({ error: 'Bill not found' });
++        }
++        if (user.role === 'Doctor') {
++            const [[allowed]]=await mysqlPool.query('SELECT appointment_id FROM APPOINTMENT WHERE appointment_id=? AND doctor_id=?',[billCheck[0].appointment_id,user.id]);
++            if(!allowed) return res.status(404).json({error:'Bill not found'});
+         }
+ 
+         const [rows] = await mysqlPool.query(
+diff --git a/06_Application/routes/patient.js b/06_Application/routes/patient.js
+--- a/06_Application/routes/patient.js
++++ b/06_Application/routes/patient.js
+@@ -54,7 +54,7 @@
+     try {
+         const mongo = getMongo();
+         const requestIds = summaries.map(s => s.request_id);
+-        const raw = await mongo.collection('lab_reports_raw').find({ request_id: { $in: requestIds } }).toArray();
++        const raw = await mongo.collection('lab_reports_raw').find({ request_id: { $in: requestIds } }, { projection: { _id: 0 } }).toArray();
+         const merged = summaries.map(s => ({ ...s, raw: raw.find(r => r.request_id === s.request_id) || null }));
+         res.json(merged);
+     } catch (mongoErr) {
+@@ -105,11 +105,11 @@
+     // Simple demo: all 30-min slots 9:00-17:00, filter out already-booked
+     const allSlots = [];
+     for (let h = 9; h < 17; h++) {
+-        allSlots.push(h + ':00:00');
+-        allSlots.push(h + ':30:00');
++        allSlots.push(String(h).padStart(2,'0') + ':00:00');
++        allSlots.push(String(h).padStart(2,'0') + ':30:00');
+     }
+     const [booked] = await mysqlPool.query(
+-        'SELECT appointment_time FROM APPOINTMENT WHERE doctor_id=? AND appointment_date=?',
++        "SELECT appointment_time FROM APPOINTMENT WHERE doctor_id=? AND appointment_date=? AND status='Scheduled'",
+         [doctor_id, appointment_date]
+     );
+     const bookedTimes = booked.map(b => b.appointment_time);
+@@ -120,12 +120,12 @@
+ // Prescriptions for patient
+ router.get('/prescriptions', async (req, res) => {
+     const [headers] = await mysqlPool.query(
+-        `SELECT p.prescription_id, p.prescription_date, p.status, u.name AS doctor_name
++        `SELECT p.prescription_id, p.prescribed_date, p.status, u.name AS doctor_name
+          FROM PRESCRIPTION p
+          JOIN DOCTOR d ON p.doctor_id = d.doctor_id
+          JOIN \`USER\` u ON d.doctor_id = u.user_id
+          WHERE p.patient_id = ?
+-         ORDER BY p.prescription_date DESC`,
++         ORDER BY p.prescribed_date DESC`,
+         [req.session.user.id]
+     );
+     res.json(headers);
+@@ -137,8 +137,9 @@
+         `SELECT pi.*, m.medicine_name
+          FROM PRESCRIPTION_ITEM pi
+          JOIN MEDICINE m ON pi.medicine_id = m.medicine_id
+-         WHERE pi.prescription_id = ?`,
+-        [req.params.id]
++         JOIN PRESCRIPTION pr ON pi.prescription_id=pr.prescription_id
++         WHERE pi.prescription_id = ? AND pr.patient_id=?`,
++        [req.params.id, req.session.user.id]
+     );
+     res.json(items);
+ });
+diff --git a/06_Application/routes/resources.js b/06_Application/routes/resources.js
+new file mode 100644
+--- /dev/null
++++ b/06_Application/routes/resources.js
+@@ -0,0 +1,39 @@
++// Shared operational screens keep their original URLs and explicit role gates.
++const router = require('express').Router();
++const {mysqlPool,getMongo}=require('../config/db');
++const {requireRole}=require('../middleware/auth');
++
++router.get('/blood-bank',requireRole('Admin','Doctor','Nurse'),async(req,res)=>{
++    const [rows]=await mysqlPool.query('SELECT blood_id,blood_group,units_available,last_updated FROM BLOOD_BANK ORDER BY blood_group');
++    res.json(rows);
++});
++router.post('/blood-bank/request',requireRole('Admin','Doctor','Nurse'),async(req,res)=>{
++    const {blood_group,units,patient_id,reason}=req.body;
++    if(!['A+','A-','B+','B-','AB+','AB-','O+','O-'].includes(blood_group)||!Number.isInteger(Number(units))||Number(units)<1||Number(units)>10||!String(reason||'').trim())
++        return res.status(400).json({error:'Enter a blood group, 1–10 units, patient and reason'});
++    const [[patient]]=await mysqlPool.query('SELECT patient_id FROM PATIENT WHERE patient_id=?',[patient_id]);
++    if(!patient) return res.status(404).json({error:'Patient not found'});
++    await getMongo().collection('audit_log').insertOne({user_id:req.session.user.id,action:'REQUEST blood',table_affected:'BLOOD_BANK',details:{patient_id:Number(patient_id),blood_group,units:Number(units),reason:String(reason).trim()},timestamp:new Date()});
++    res.status(201).json({message:'Blood request recorded. Inventory is unchanged until fulfilled.'});
++});
++router.get('/ambulances',requireRole('Admin','Receptionist'),async(req,res)=>{
++    const [rows]=await mysqlPool.query('SELECT ambulance_id,vehicle_number,driver_name,driver_phone,status FROM AMBULANCE ORDER BY vehicle_number');
++    res.json(rows);
++});
++router.post('/ambulance/:id/dispatch',requireRole('Admin','Receptionist'),async(req,res)=>{
++    const {patient_name,pickup_location,destination,contact_phone}=req.body;
++    if(![patient_name,pickup_location,destination,contact_phone].every(x=>typeof x==='string'&&x.trim())) return res.status(400).json({error:'Complete all dispatch fields'});
++    const [result]=await mysqlPool.query("UPDATE AMBULANCE SET status='On Duty' WHERE ambulance_id=? AND status='Available'",[req.params.id]);
++    if(!result.affectedRows) return res.status(409).json({error:'This ambulance is no longer available'});
++    // Operational status remains MySQL-owned. The existing flexible audit
++    // collection holds dispatch context without inventing a new workflow.
++    try { await getMongo().collection('audit_log').insertOne({user_id:req.session.user.id,action:'DISPATCH ambulance',table_affected:'AMBULANCE',details:{ambulance_id:Number(req.params.id),patient_name,pickup_location,destination,contact_phone},timestamp:new Date()}); }
++    catch(err) { return res.json({message:'Ambulance dispatched; dispatch audit could not be recorded',warning:true}); }
++    res.json({message:'Ambulance dispatched'});
++});
++router.post('/ambulance/:id/release',requireRole('Admin','Receptionist'),async(req,res)=>{
++    const [result]=await mysqlPool.query("UPDATE AMBULANCE SET status='Available' WHERE ambulance_id=?",[req.params.id]);
++    if(!result.affectedRows) return res.status(404).json({error:'Ambulance not found'});
++    res.json({message:'Ambulance released'});
++});
++module.exports=router;diff --git a/06_Application/routes/staff.js b/06_Application/routes/staff.js
+--- a/06_Application/routes/staff.js
++++ b/06_Application/routes/staff.js
+@@ -6,7 +6,7 @@
+ 
+ // ---- Nurse: ward / beds / patients ----
+ router.get('/nurse/beds', requireRole('Nurse'), async (req, res) => {
+-    const [rows] = await mysqlPool.query('SELECT * FROM vw_bed_occupancy');
++    const [rows] = await mysqlPool.query('SELECT b.*, u.name AS patient_name FROM BED b LEFT JOIN `USER` u ON b.patient_id=u.user_id ORDER BY b.ward_name,b.bed_number');
+     res.json(rows);
+ });
+ 
+@@ -104,7 +104,9 @@
+ router.get('/pharmacist/prescription-items/:prescriptionId', requireRole('Admin', 'Pharmacist'), async (req, res) => {
+     const [rows] = await mysqlPool.query(
+         `SELECT pi.item_id, pi.medicine_id, m.medicine_name, pi.dosage, pi.duration_days, pi.quantity,
+-                m.stock_qty AS current_stock
++                m.stock_qty AS current_stock,
++                (SELECT SUM(x.quantity) FROM PRESCRIPTION_ITEM x WHERE x.prescription_id=pi.prescription_id AND x.medicine_id=pi.medicine_id) AS required_quantity,
++                m.stock_qty - (SELECT SUM(x.quantity) FROM PRESCRIPTION_ITEM x WHERE x.prescription_id=pi.prescription_id AND x.medicine_id=pi.medicine_id) AS stock_after
+          FROM PRESCRIPTION_ITEM pi JOIN MEDICINE m ON pi.medicine_id = m.medicine_id
+          WHERE pi.prescription_id = ?`,
+         [req.params.prescriptionId]
+@@ -181,12 +183,35 @@
+ 
+ router.post('/receptionist/generate-bill', requireRole('Receptionist'), async (req, res) => {
+     const { appointment_id } = req.body;
+-    try {
+-        await mysqlPool.query('CALL sp_generate_bill(?, ?)', [appointment_id, req.session.user.id]);
+-        res.status(201).json({ message: 'Bill generated' });
++    if (!Number.isSafeInteger(Number(appointment_id)) || Number(appointment_id) < 1) {
++        return res.status(400).json({ error: 'Choose a valid appointment' });
++    }
++    const conn = await mysqlPool.getConnection();
++    try {
++        // Same connection: LAST_INSERT_ID is session-scoped; the procedure and
++        // bill-item triggers remain the only source of prices and totals.
++        await conn.query('CALL sp_generate_bill(?, ?)', [appointment_id, req.session.user.id]);
++        const [[bill]] = await conn.query('SELECT bill_id, patient_id, appointment_id, total_amount, payment_status FROM BILL WHERE bill_id=LAST_INSERT_ID()');
++        res.status(201).json({ message: 'Bill generated', bill });
+     } catch (err) {
+         res.status(409).json({ error: err.sqlMessage || 'Could not generate bill' });
+-    }
++    } finally {
++        conn.release();
++    }
++});
++
++// Receptionist appointment context for the procedure-backed billing action.
++router.get('/receptionist/appointments', requireRole('Receptionist'), async (req, res) => {
++    const [rows] = await mysqlPool.query(`
++        SELECT a.appointment_id, a.patient_id, up.name AS patient_name,
++               ud.name AS doctor_name, a.appointment_date, a.appointment_time,
++               a.status, c.consultation_id,
++               (SELECT MAX(b.bill_id) FROM BILL b WHERE b.appointment_id=a.appointment_id) AS bill_id
++        FROM APPOINTMENT a JOIN \`USER\` up ON up.user_id=a.patient_id
++        JOIN \`USER\` ud ON ud.user_id=a.doctor_id
++        LEFT JOIN CONSULTATION c ON c.appointment_id=a.appointment_id
++        ORDER BY a.appointment_date DESC, a.appointment_time DESC`);
++    res.json(rows);
+ });
+ 
+ // Pharmacist notifications (low stock alerts) -- written by trg_low_stock_alert
+diff --git a/06_Application/server.js b/06_Application/server.js
+--- a/06_Application/server.js
++++ b/06_Application/server.js
+@@ -1,4 +1,6 @@
+ require('dotenv').config();
++// Async route errors must reach Express rather than terminate a request.
++require('express-async-errors');
+ const express = require('express');
+ const session = require('express-session');
+ const path = require('path');
+@@ -6,6 +8,10 @@
+ 
+ const app = express();
+ app.use(express.json());
++// Browser API origin is supplied by environment, not baked into any page.
++app.get('/runtime-config.js', (req, res) => res.type('application/javascript').send(
++    'window.MV_API_BASE=' + JSON.stringify(process.env.REACT_APP_BACKEND_URL || '') + ';'
++));
+ app.use(express.static(path.join(__dirname, 'public')));
+ 
+ app.use(session({
+@@ -16,6 +22,7 @@
+ }));
+ 
+ app.use('/api/auth', require('./routes/auth'));
++app.use('/api/admin', require('./routes/resources'));
+ app.use('/api/admin', require('./routes/admin'));
+ app.use('/api/doctor', require('./routes/doctor'));
+ app.use('/api/patient', require('./routes/patient'));
+@@ -25,6 +32,11 @@
+ 
+ app.get('/', (req, res) => res.redirect('/login.html'));
+ app.get('/health', (req, res) => res.json({ status: 'ok' }));
++
++app.use((err, req, res, next) => {
++    console.error(err);
++    res.status(500).json({ error: 'The request could not be completed. Please try again.' });
++});
+ 
+ const PORT = process.env.PORT || 3000;
+ 
+diff --git a/06_Application/yarn.lock b/06_Application/yarn.lock
+new file mode 100644
+--- /dev/null
++++ b/06_Application/yarn.lock
+@@ -0,0 +1,679 @@
++# THIS IS AN AUTOGENERATED FILE. DO NOT EDIT THIS FILE DIRECTLY.
++# yarn lockfile v1
++
++
++"@mongodb-js/saslprep@^1.3.0":
++  version "1.5.4"
++  resolved "https://registry.yarnpkg.com/@mongodb-js/saslprep/-/saslprep-1.5.4.tgz#3642b46addbc9668b95bb2795c482b457a5f9d00"
++  integrity sha512-05UC0jQsjKAOuXQ0H9Ud9vUTJpZIg+n/FinpR30tI5I8pY2inTfPOZ5OF/cg3Ce/N9MoD1xhRCeOsJtuTbFYlw==
++  dependencies:
++    sparse-bitfield "^3.0.3"
++
++"@types/webidl-conversions@*":
++  version "7.0.3"
++  resolved "https://registry.yarnpkg.com/@types/webidl-conversions/-/webidl-conversions-7.0.3.tgz#1306dbfa53768bcbcfc95a1c8cde367975581859"
++  integrity sha512-CiJJvcRtIgzadHCYXw7dqEnMNRjhGZlYK05Mj9OyktqV8uVT8fD2BFOB7S1uwBE3Kj2Z+4UyPmFw/Ixgw/LAlA==
++
++"@types/whatwg-url@^11.0.2":
++  version "11.0.5"
++  resolved "https://registry.yarnpkg.com/@types/whatwg-url/-/whatwg-url-11.0.5.tgz#aaa2546e60f0c99209ca13360c32c78caf2c409f"
++  integrity sha512-coYR071JRaHa+xoEvvYqvnIHaVqaYrLPbsufM9BF63HkwI5Lgmy2QR8Q5K/lYDYo5AK82wOvSOS0UsLTpTG7uQ==
++  dependencies:
++    "@types/webidl-conversions" "*"
++
++accepts@~1.3.8:
++  version "1.3.8"
++  resolved "https://registry.yarnpkg.com/accepts/-/accepts-1.3.8.tgz#0bf0be125b67014adcb0b0921e62db7bffe16b2e"
++  integrity sha512-PYAthTa2m2VKxuvSD3DPC/Gy+U+sOA1LAuT8mkmRuvw+NACSaeXEQ+NHcVF7rONl6qcaxV3Uuemwawk+7+SJLw==
++  dependencies:
++    mime-types "~2.1.34"
++    negotiator "0.6.3"
++
++array-flatten@1.1.1:
++  version "1.1.1"
++  resolved "https://registry.yarnpkg.com/array-flatten/-/array-flatten-1.1.1.tgz#9a5f699051b1e7073328f2a008968b64ea2955d2"
++  integrity sha512-PCVAQswWemu6UdxsDFFX/+gVeYqKAod3D3UVm91jHwynguOwAvYPhx8nNlM++NqRcK6CxxpUafjmhIdKiHibqg==
++
++aws-ssl-profiles@^1.1.2:
++  version "1.1.2"
++  resolved "https://registry.yarnpkg.com/aws-ssl-profiles/-/aws-ssl-profiles-1.1.2.tgz#157dd77e9f19b1d123678e93f120e6f193022641"
++  integrity sha512-NZKeq9AfyQvEeNlN0zSYAaWrmBffJh3IELMZfRpJVWgrpEbtEpnjvzqBPf+mxoI287JohRDoa+/nsfqqiZmF6g==
++
++bcryptjs@^2.4.3:
++  version "2.4.3"
++  resolved "https://registry.yarnpkg.com/bcryptjs/-/bcryptjs-2.4.3.tgz#9ab5627b93e60621ff7cdac5da9733027df1d0cb"
++  integrity sha512-V/Hy/X9Vt7f3BbPJEi8BdVFMByHi+jNXrYkW3huaybV/kQ0KJg0Y6PkEMbn+zeT+i+SiKZ/HMqJGIIt4LZDqNQ==
++
++body-parser@~1.20.5:
++  version "1.20.8"
++  resolved "https://registry.yarnpkg.com/body-parser/-/body-parser-1.20.8.tgz#328d51ce46cb19c983f3d9661016df2765283a37"
++  integrity sha512-JNcyFQ64OiijEkPzUBTCe+hyPXUD/3LEldGQ6iF5LR1w00mx9o7xtDWHXBY2iItjdCFGoilOLNQbH943ut7pHA==
++  dependencies:
++    bytes "~3.1.2"
++    content-type "~1.0.5"
++    debug "2.6.9"
++    depd "2.0.0"
++    destroy "~1.2.0"
++    http-errors "~2.0.1"
++    iconv-lite "~0.4.24"
++    on-finished "~2.4.1"
++    qs "~6.16.0"
++    raw-body "~2.5.3"
++    type-is "~1.6.18"
++    unpipe "~1.0.0"
++
++bson@^6.10.4:
++  version "6.10.4"
++  resolved "https://registry.yarnpkg.com/bson/-/bson-6.10.4.tgz#d530733bb5bb16fb25c162e01a3344fab332fd2b"
++  integrity sha512-WIsKqkSC0ABoBJuT1LEX+2HEvNmNKKgnTAyd0fL8qzK4SH2i9NXg+t08YtdZp/V9IZ33cxe3iV4yM0qg8lMQng==
++
++bytes@~3.1.2:
++  version "3.1.2"
++  resolved "https://registry.yarnpkg.com/bytes/-/bytes-3.1.2.tgz#8b0beeb98605adf1b128fa4386403c009e0221a5"
++  integrity sha512-/Nf7TyzTx6S3yRJObOAV7956r8cr2+Oj8AC5dt8wSP3BQAoeX58NoHyCU8P8zGkNXStjTSi6fzO6F0pBdcYbEg==
++
++call-bind-apply-helpers@^1.0.1, call-bind-apply-helpers@^1.0.2:
++  version "1.0.2"
++  resolved "https://registry.yarnpkg.com/call-bind-apply-helpers/-/call-bind-apply-helpers-1.0.2.tgz#4b5428c222be985d79c3d82657479dbe0b59b2d6"
++  integrity sha512-Sp1ablJ0ivDkSzjcaJdxEunN5/XvksFJ2sMBFfq6x0ryhQV/2b/KwFe21cMpmHtPOSij8K99/wSfoEuTObmuMQ==
++  dependencies:
++    es-errors "^1.3.0"
++    function-bind "^1.1.2"
++
++call-bound@^1.0.2:
++  version "1.0.4"
++  resolved "https://registry.yarnpkg.com/call-bound/-/call-bound-1.0.4.tgz#238de935d2a2a692928c538c7ccfa91067fd062a"
++  integrity sha512-+ys997U96po4Kx/ABpBCqhA9EuxJaQWDQg7295H4hBphv3IZg0boBKuwYpt4YXp6MZ5AmZQnU/tyMTlRpaSejg==
++  dependencies:
++    call-bind-apply-helpers "^1.0.2"
++    get-intrinsic "^1.3.0"
++
++content-disposition@~0.5.4:
++  version "0.5.4"
++  resolved "https://registry.yarnpkg.com/content-disposition/-/content-disposition-0.5.4.tgz#8b82b4efac82512a02bb0b1dcec9d2c5e8eb5bfe"
++  integrity sha512-FveZTNuGw04cxlAiWbzi6zTAL/lhehaWbTtgluJh4/E95DqMwTmha3KZN1aAWA8cFIhHzMZUvLevkw5Rqk+tSQ==
++  dependencies:
++    safe-buffer "5.2.1"
++
++content-type@~1.0.4, content-type@~1.0.5:
++  version "1.0.5"
++  resolved "https://registry.yarnpkg.com/content-type/-/content-type-1.0.5.tgz#8b773162656d1d1086784c8f23a54ce6d73d7918"
++  integrity sha512-nTjqfcBFEipKdXCv4YDQWCfmcLZKm81ldF0pAopTvyrFGVbcR6P/VAAd5G7N+0tTr8QqiU0tFadD6FK4NtJwOA==
++
++cookie-signature@~1.0.6, cookie-signature@~1.0.7:
++  version "1.0.7"
++  resolved "https://registry.yarnpkg.com/cookie-signature/-/cookie-signature-1.0.7.tgz#ab5dd7ab757c54e60f37ef6550f481c426d10454"
++  integrity sha512-NXdYc3dLr47pBkpUCHtKSwIOQXLVn8dZEuywboCOJY/osA0wFSLlSawr3KN8qXJEyX66FcONTH8EIlVuK0yyFA==
++
++cookie@~0.7.1, cookie@~0.7.2:
++  version "0.7.2"
++  resolved "https://registry.yarnpkg.com/cookie/-/cookie-0.7.2.tgz#556369c472a2ba910f2979891b526b3436237ed7"
++  integrity sha512-yki5XnKuf750l50uGTllt6kKILY4nQ1eNIQatoXEByZ5dWgnKqbnqmTrBE5B4N7lrMJKQ2ytWMiTO2o0v6Ew/w==
++
++debug@2.6.9, debug@~2.6.9:
++  version "2.6.9"
++  resolved "https://registry.yarnpkg.com/debug/-/debug-2.6.9.tgz#5d128515df134ff327e90a4c93f4e077a536341f"
++  integrity sha512-bC7ElrdJaJnPbAP+1EotYvqZsb3ecl5wi6Bfi6BJTUcNowp6cvspg0jXznRTKDjm/E7AdgFBVeAPVMNcKGsHMA==
++  dependencies:
++    ms "2.0.0"
++
++depd@2.0.0, depd@~2.0.0:
++  version "2.0.0"
++  resolved "https://registry.yarnpkg.com/depd/-/depd-2.0.0.tgz#b696163cc757560d09cf22cc8fad1571b79e76df"
++  integrity sha512-g7nH6P6dyDioJogAAGprGpCtVImJhpPk/roCzdb3fIh61/s/nPsfR6onyMwkCAR/OlC3yBC0lESvUoQEAssIrw==
++
++destroy@1.2.0, destroy@~1.2.0:
++  version "1.2.0"
++  resolved "https://registry.yarnpkg.com/destroy/-/destroy-1.2.0.tgz#4803735509ad8be552934c67df614f94e66fa015"
++  integrity sha512-2sJGJTaXIIaR1w4iJSNoN0hnMY7Gpc/n8D4qSCJw8QqFWXf7cuAgnEHxBpweaVcPevC2l3KpjYCx3NypQQgaJg==
++
++dotenv@^16.4.5:
++  version "16.6.1"
++  resolved "https://registry.yarnpkg.com/dotenv/-/dotenv-16.6.1.tgz#773f0e69527a8315c7285d5ee73c4459d20a8020"
++  integrity sha512-uBq4egWHTcTt33a72vpSG0z3HnPuIl6NqYcTrKEg2azoEyl2hpW0zqlxysq2pK9HlDIHyHyakeYaYnSAwd8bow==
++
++dunder-proto@^1.0.1:
++  version "1.0.1"
++  resolved "https://registry.yarnpkg.com/dunder-proto/-/dunder-proto-1.0.1.tgz#d7ae667e1dc83482f8b70fd0f6eefc50da30f58a"
++  integrity sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A==
++  dependencies:
++    call-bind-apply-helpers "^1.0.1"
++    es-errors "^1.3.0"
++    gopd "^1.2.0"
++
++ee-first@1.1.1:
++  version "1.1.1"
++  resolved "https://registry.yarnpkg.com/ee-first/-/ee-first-1.1.1.tgz#590c61156b0ae2f4f0255732a158b266bc56b21d"
++  integrity sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow==
++
++encodeurl@~2.0.0:
++  version "2.0.0"
++  resolved "https://registry.yarnpkg.com/encodeurl/-/encodeurl-2.0.0.tgz#7b8ea898077d7e409d3ac45474ea38eaf0857a58"
++  integrity sha512-Q0n9HRi4m6JuGIV1eFlmvJB7ZEVxu93IrMyiMsGC0lrMJMWzRgx6WGquyfQgZVb31vhGgXnfmPNNXmxnOkRBrg==
++
++es-define-property@^1.0.1:
++  version "1.0.1"
++  resolved "https://registry.yarnpkg.com/es-define-property/-/es-define-property-1.0.1.tgz#983eb2f9a6724e9303f61addf011c72e09e0b0fa"
++  integrity sha512-e3nRfgfUZ4rNGL232gUgX06QNyyez04KdjFrF+LTRoOXmrOgFKDg4BCdsjW8EnT69eqdYGmRpJwiPVYNrCaW3g==
++
++es-errors@^1.3.0:
++  version "1.3.0"
++  resolved "https://registry.yarnpkg.com/es-errors/-/es-errors-1.3.0.tgz#05f75a25dab98e4fb1dcd5e1472c0546d5057c8f"
++  integrity sha512-Zf5H2Kxt2xjTvbJvP2ZWLEICxA6j+hAmMzIlypy4xcBg1vKVnx89Wy0GbS+kf5cwCVFFzdCFh2XSCFNULS6csw==
++
++es-object-atoms@^1.0.0, es-object-atoms@^1.1.1:
++  version "1.1.2"
++  resolved "https://registry.yarnpkg.com/es-object-atoms/-/es-object-atoms-1.1.2.tgz#a2d0b373205724dfa525d23b0c3e1b1ca582c99b"
++  integrity sha512-HWcBoN6NileqtSydK2FqHbS/LoDd2pqrnQHLyJzBj4kOp/ky2MWMN694xOfkK8/SnUsW2DH7EfyVlydKCsm1Zw==
++  dependencies:
++    es-errors "^1.3.0"
++
++escape-html@~1.0.3:
++  version "1.0.3"
++  resolved "https://registry.yarnpkg.com/escape-html/-/escape-html-1.0.3.tgz#0258eae4d3d0c0974de1c169188ef0051d1d1988"
++  integrity sha512-NiSupZ4OeuGwr68lGIeym/ksIZMJodUGOSCZ/FSnTxcrekbvqrgdUxlJOMpijaKZVjAJrWrGs/6Jy8OMuyj9ow==
++
++etag@~1.8.1:
++  version "1.8.1"
++  resolved "https://registry.yarnpkg.com/etag/-/etag-1.8.1.tgz#41ae2eeb65efa62268aebfea83ac7d79299b0887"
++  integrity sha512-aIL5Fx7mawVa300al2BnEE4iNvo1qETxLrPI/o05L7z6go7fCw1J6EQmbK4FmJ2AS7kgVF/KEZWufBfdClMcPg==
++
++express-async-errors@^3.1.1:
++  version "3.1.1"
++  resolved "https://registry.yarnpkg.com/express-async-errors/-/express-async-errors-3.1.1.tgz#6053236d61d21ddef4892d6bd1d736889fc9da41"
++  integrity sha512-h6aK1da4tpqWSbyCa3FxB/V6Ehd4EEB15zyQq9qe75OZBp0krinNKuH4rAY+S/U/2I36vdLAUFSjQJ+TFmODng==
++
++express-session@^1.18.0:
++  version "1.19.0"
++  resolved "https://registry.yarnpkg.com/express-session/-/express-session-1.19.0.tgz#682139f6eec6c69db9febbe2362e8a85dd84af2f"
++  integrity sha512-0csaMkGq+vaiZTmSMMGkfdCOabYv192VbytFypcvI0MANrp+4i/7yEkJ0sbAEhycQjntaKGzYfjfXQyVb7BHMA==
++  dependencies:
++    cookie "~0.7.2"
++    cookie-signature "~1.0.7"
++    debug "~2.6.9"
++    depd "~2.0.0"
++    on-headers "~1.1.0"
++    parseurl "~1.3.3"
++    safe-buffer "~5.2.1"
++    uid-safe "~2.1.5"
++
++express@^4.19.2:
++  version "4.22.3"
++  resolved "https://registry.yarnpkg.com/express/-/express-4.22.3.tgz#e8f898d3c17582b1e311dd2c5cd6d8deff84724b"
++  integrity sha512-Bdcs4+3qlpVlx2NRn6fgX2Ue2/gGRaPeawebgclM0ERSCqDpA+owF1fdPwjJUTAJWMTuAaxjDf+hzb0/4eKvvw==
++  dependencies:
++    accepts "~1.3.8"
++    array-flatten "1.1.1"
++    body-parser "~1.20.5"
++    content-disposition "~0.5.4"
++    content-type "~1.0.4"
++    cookie "~0.7.1"
++    cookie-signature "~1.0.6"
++    debug "2.6.9"
++    depd "2.0.0"
++    encodeurl "~2.0.0"
++    escape-html "~1.0.3"
++    etag "~1.8.1"
++    finalhandler "~1.3.1"
++    fresh "~0.5.2"
++    http-errors "~2.0.0"
++    merge-descriptors "1.0.3"
++    methods "~1.1.2"
++    on-finished "~2.4.1"
++    parseurl "~1.3.3"
++    path-to-regexp "~0.1.13"
++    proxy-addr "~2.0.7"
++    qs "~6.16.0"
++    range-parser "~1.2.1"
++    safe-buffer "5.2.1"
++    send "~0.19.0"
++    serve-static "~1.16.2"
++    setprototypeof "1.2.0"
++    statuses "~2.0.1"
++    type-is "~1.6.18"
++    utils-merge "1.0.1"
++    vary "~1.1.2"
++
++finalhandler@~1.3.1:
++  version "1.3.2"
++  resolved "https://registry.yarnpkg.com/finalhandler/-/finalhandler-1.3.2.tgz#1ebc2228fc7673aac4a472c310cc05b77d852b88"
++  integrity sha512-aA4RyPcd3badbdABGDuTXCMTtOneUCAYH/gxoYRTZlIJdF0YPWuGqiAsIrhNnnqdXGswYk6dGujem4w80UJFhg==
++  dependencies:
++    debug "2.6.9"
++    encodeurl "~2.0.0"
++    escape-html "~1.0.3"
++    on-finished "~2.4.1"
++    parseurl "~1.3.3"
++    statuses "~2.0.2"
++    unpipe "~1.0.0"
++
++forwarded@0.2.0:
++  version "0.2.0"
++  resolved "https://registry.yarnpkg.com/forwarded/-/forwarded-0.2.0.tgz#2269936428aad4c15c7ebe9779a84bf0b2a81811"
++  integrity sha512-buRG0fpBtRHSTCOASe6hD258tEubFoRLb4ZNA6NxMVHNw2gOcwHo9wyablzMzOA5z9xA9L1KNjk/Nt6MT9aYow==
++
++fresh@~0.5.2:
++  version "0.5.2"
++  resolved "https://registry.yarnpkg.com/fresh/-/fresh-0.5.2.tgz#3d8cadd90d976569fa835ab1f8e4b23a105605a7"
++  integrity sha512-zJ2mQYM18rEFOudeV4GShTGIQ7RbzA7ozbU9I/XBpm7kqgMywgmylMwXHxZJmkVoYkna9d2pVXVXPdYTP9ej8Q==
++
++function-bind@^1.1.2:
++  version "1.1.2"
++  resolved "https://registry.yarnpkg.com/function-bind/-/function-bind-1.1.2.tgz#2c02d864d97f3ea6c8830c464cbd11ab6eab7a1c"
++  integrity sha512-7XHNxH7qX9xG5mIwxkhumTox/MIRNcOgDrxWsMt2pAr23WHp6MrRlN7FBSFpCpr+oVO0F744iUgR82nJMfG2SA==
++
++generate-function@^2.3.1:
++  version "2.3.1"
++  resolved "https://registry.yarnpkg.com/generate-function/-/generate-function-2.3.1.tgz#f069617690c10c868e73b8465746764f97c3479f"
++  integrity sha512-eeB5GfMNeevm/GRYq20ShmsaGcmI81kIX2K9XQx5miC8KdHaC6Jm0qQ8ZNeGOi7wYB8OsdxKs+Y2oVuTFuVwKQ==
++  dependencies:
++    is-property "^1.0.2"
++
++get-intrinsic@^1.2.5, get-intrinsic@^1.3.0:
++  version "1.3.0"
++  resolved "https://registry.yarnpkg.com/get-intrinsic/-/get-intrinsic-1.3.0.tgz#743f0e3b6964a93a5491ed1bffaae054d7f98d01"
++  integrity sha512-9fSjSaos/fRIVIp+xSJlE6lfwhES7LNtKaCBIamHsjr2na1BiABJPo0mOjjz8GJDURarmCPGqaiVg5mfjb98CQ==
++  dependencies:
++    call-bind-apply-helpers "^1.0.2"
++    es-define-property "^1.0.1"
++    es-errors "^1.3.0"
++    es-object-atoms "^1.1.1"
++    function-bind "^1.1.2"
++    get-proto "^1.0.1"
++    gopd "^1.2.0"
++    has-symbols "^1.1.0"
++    hasown "^2.0.2"
++    math-intrinsics "^1.1.0"
++
++get-proto@^1.0.1:
++  version "1.0.1"
++  resolved "https://registry.yarnpkg.com/get-proto/-/get-proto-1.0.1.tgz#150b3f2743869ef3e851ec0c49d15b1d14d00ee1"
++  integrity sha512-sTSfBjoXBp89JvIKIefqw7U2CCebsc74kiY6awiGogKtoSGbgjYE/G/+l9sF3MWFPNc9IcoOC4ODfKHfxFmp0g==
++  dependencies:
++    dunder-proto "^1.0.1"
++    es-object-atoms "^1.0.0"
++
++gopd@^1.2.0:
++  version "1.2.0"
++  resolved "https://registry.yarnpkg.com/gopd/-/gopd-1.2.0.tgz#89f56b8217bdbc8802bd299df6d7f1081d7e51a1"
++  integrity sha512-ZUKRh6/kUFoAiTAtTYPZJ3hw9wNxx+BIBOijnlG9PnrJsCcSjs1wyyD6vJpaYtgnzDrKYRSqf3OO6Rfa93xsRg==
++
++has-symbols@^1.1.0:
++  version "1.1.0"
++  resolved "https://registry.yarnpkg.com/has-symbols/-/has-symbols-1.1.0.tgz#fc9c6a783a084951d0b971fe1018de813707a338"
++  integrity sha512-1cDNdwJ2Jaohmb3sg4OmKaMBwuC48sYni5HUw2DvsC8LjGTLK9h+eb1X6RyuOHe4hT0ULCW68iomhjUoKUqlPQ==
++
++hasown@^2.0.2:
++  version "2.0.4"
++  resolved "https://registry.yarnpkg.com/hasown/-/hasown-2.0.4.tgz#8c62d8cb90beb2aad5d0a5b67581ad9854c3f003"
++  integrity sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A==
++  dependencies:
++    function-bind "^1.1.2"
++
++http-errors@~2.0.0, http-errors@~2.0.1:
++  version "2.0.1"
++  resolved "https://registry.yarnpkg.com/http-errors/-/http-errors-2.0.1.tgz#36d2f65bc909c8790018dd36fb4d93da6caae06b"
++  integrity sha512-4FbRdAX+bSdmo4AUFuS0WNiPz8NgFt+r8ThgNWmlrjQjt1Q7ZR9+zTlce2859x4KSXrwIsaeTqDoKQmtP8pLmQ==
++  dependencies:
++    depd "~2.0.0"
++    inherits "~2.0.4"
++    setprototypeof "~1.2.0"
++    statuses "~2.0.2"
++    toidentifier "~1.0.1"
++
++iconv-lite@^0.7.3:
++  version "0.7.3"
++  resolved "https://registry.yarnpkg.com/iconv-lite/-/iconv-lite-0.7.3.tgz#84ee12f963e7de50bc01a13e160a078b3b0f415f"
++  integrity sha512-IKXpvIzjnC9XTAUbVBcMfGS0EPaIXtW6v+zr+RRp+hqULEpo0owZax6wyRwPOJbWbzjYspQwusTsfVr0ifh4uQ==
++  dependencies:
++    safer-buffer ">= 2.1.2 < 3.0.0"
++
++iconv-lite@~0.4.24:
++  version "0.4.24"
++  resolved "https://registry.yarnpkg.com/iconv-lite/-/iconv-lite-0.4.24.tgz#2022b4b25fbddc21d2f524974a474aafe733908b"
++  integrity sha512-v3MXnZAcvnywkTUEZomIActle7RXXeedOR31wwl7VlyoXO4Qi9arvSenNQWne1TcRwhCL1HwLI21bEqdpj8/rA==
++  dependencies:
++    safer-buffer ">= 2.1.2 < 3"
++
++inherits@~2.0.4:
++  version "2.0.4"
++  resolved "https://registry.yarnpkg.com/inherits/-/inherits-2.0.4.tgz#0fa2c64f932917c3433a0ded55363aae37416b7c"
++  integrity sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ==
++
++ipaddr.js@1.9.1:
++  version "1.9.1"
++  resolved "https://registry.yarnpkg.com/ipaddr.js/-/ipaddr.js-1.9.1.tgz#bff38543eeb8984825079ff3a2a8e6cbd46781b3"
++  integrity sha512-0KI/607xoxSToH7GjN1FfSbLoU0+btTicjsQSWQlh/hZykN8KpmMf7uYwPW3R+akZ6R/w18ZlXSHBYXiYUPO3g==
++
++is-property@^1.0.2:
++  version "1.0.2"
++  resolved "https://registry.yarnpkg.com/is-property/-/is-property-1.0.2.tgz#57fe1c4e48474edd65b09911f26b1cd4095dda84"
++  integrity sha512-Ks/IoX00TtClbGQr4TWXemAnktAQvYB7HzcCxDGqEZU6oCmb2INHuOoKxbtR+HFkmYWBKv/dOZtGRiAjDhj92g==
++
++long@^5.3.2:
++  version "5.3.2"
++  resolved "https://registry.yarnpkg.com/long/-/long-5.3.2.tgz#1d84463095999262d7d7b7f8bfd4a8cc55167f83"
++  integrity sha512-mNAgZ1GmyNhD7AuqnTG3/VQ26o760+ZYBPKjPvugO8+nLbYfX6TVpJPseBvopbdY+qpZ/lKUnmEc1LeZYS3QAA==
++
++lru.min@^1.1.0, lru.min@^1.1.4:
++  version "1.1.5"
++  resolved "https://registry.yarnpkg.com/lru.min/-/lru.min-1.1.5.tgz#bd32483f4e342261d0eb011b06d2219e6b5ef818"
++  integrity sha512-5J9ysMYUpYIg9RF2vJpy9SinEmSviFSe0GyPpCQ4L5QSkLAgeLXlTAOu2ZwWUU5m+0SBl6gUU1R1ZQB3aKypfA==
++
++math-intrinsics@^1.1.0:
++  version "1.1.0"
++  resolved "https://registry.yarnpkg.com/math-intrinsics/-/math-intrinsics-1.1.0.tgz#a0dd74be81e2aa5c2f27e65ce283605ee4e2b7f9"
++  integrity sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==
++
++media-typer@0.3.0:
++  version "0.3.0"
++  resolved "https://registry.yarnpkg.com/media-typer/-/media-typer-0.3.0.tgz#8710d7af0aa626f8fffa1ce00168545263255748"
++  integrity sha512-dq+qelQ9akHpcOl/gUVRTxVIOkAJ1wR3QAvb4RsVjS8oVoFjDGTc679wJYmUmknUF5HwMLOgb5O+a3KxfWapPQ==
++
++memory-pager@^1.0.2:
++  version "1.5.0"
++  resolved "https://registry.yarnpkg.com/memory-pager/-/memory-pager-1.5.0.tgz#d8751655d22d384682741c972f2c3d6dfa3e66b5"
++  integrity sha512-ZS4Bp4r/Zoeq6+NLJpP+0Zzm0pR8whtGPf1XExKLJBAczGMnSi3It14OiNCStjQjM6NU1okjQGSxgEZN8eBYKg==
++
++merge-descriptors@1.0.3:
++  version "1.0.3"
++  resolved "https://registry.yarnpkg.com/merge-descriptors/-/merge-descriptors-1.0.3.tgz#d80319a65f3c7935351e5cfdac8f9318504dbed5"
++  integrity sha512-gaNvAS7TZ897/rVaZ0nMtAyxNyi/pdbjbAwUpFQpN70GqnVfOiXpeUUMKRBmzXaSQ8DdTX4/0ms62r2K+hE6mQ==
++
++methods@~1.1.2:
++  version "1.1.2"
++  resolved "https://registry.yarnpkg.com/methods/-/methods-1.1.2.tgz#5529a4d67654134edcc5266656835b0f851afcee"
++  integrity sha512-iclAHeNqNm68zFtnZ0e+1L2yUIdvzNoauKU4WBA3VvH/vPFieF7qfRlwUZU+DA9P9bPXIS90ulxoUoCH23sV2w==
++
++mime-db@1.52.0:
++  version "1.52.0"
++  resolved "https://registry.yarnpkg.com/mime-db/-/mime-db-1.52.0.tgz#bbabcdc02859f4987301c856e3387ce5ec43bf70"
++  integrity sha512-sPU4uV7dYlvtWJxwwxHD0PuihVNiE7TyAbQ5SWxDCB9mUYvOgroQOwYQQOKPJ8CIbE+1ETVlOoK1UC2nU3gYvg==
++
++mime-types@~2.1.24, mime-types@~2.1.34:
++  version "2.1.35"
++  resolved "https://registry.yarnpkg.com/mime-types/-/mime-types-2.1.35.tgz#381a871b62a734450660ae3deee44813f70d959a"
++  integrity sha512-ZDY+bPm5zTTF+YpCrAU9nK0UgICYPT0QtT1NZWFv4s++TNkcgVaT0g6+4R2uI4MjQjzysHB1zxuWL50hzaeXiw==
++  dependencies:
++    mime-db "1.52.0"
++
++mime@1.6.0:
++  version "1.6.0"
++  resolved "https://registry.yarnpkg.com/mime/-/mime-1.6.0.tgz#32cd9e5c64553bd58d19a568af452acff04981b1"
++  integrity sha512-x0Vn8spI+wuJ1O6S7gnbaQg8Pxh4NNHb7KSINmEWKiPE4RKOplvijn+NkmYmmRgP68mc70j2EbeTFRsrswaQeg==
++
++mongodb-connection-string-url@^3.0.2:
++  version "3.0.2"
++  resolved "https://registry.yarnpkg.com/mongodb-connection-string-url/-/mongodb-connection-string-url-3.0.2.tgz#e223089dfa0a5fa9bf505f8aedcbc67b077b33e7"
++  integrity sha512-rMO7CGo/9BFwyZABcKAWL8UJwH/Kc2x0g72uhDWzG48URRax5TCIcJ7Rc3RZqffZzO/Gwff/jyKwCU9TN8gehA==
++  dependencies:
++    "@types/whatwg-url" "^11.0.2"
++    whatwg-url "^14.1.0 || ^13.0.0"
++
++mongodb@^6.7.0:
++  version "6.21.0"
++  resolved "https://registry.yarnpkg.com/mongodb/-/mongodb-6.21.0.tgz#f83355905900f2e7a912593f0315d5e2e0bda576"
++  integrity sha512-URyb/VXMjJ4da46OeSXg+puO39XH9DeQpWCslifrRn9JWugy0D+DvvBvkm2WxmHe61O/H19JM66p1z7RHVkZ6A==
++  dependencies:
++    "@mongodb-js/saslprep" "^1.3.0"
++    bson "^6.10.4"
++    mongodb-connection-string-url "^3.0.2"
++
++ms@2.0.0:
++  version "2.0.0"
++  resolved "https://registry.yarnpkg.com/ms/-/ms-2.0.0.tgz#5608aeadfc00be6c2901df5f9861788de0d597c8"
++  integrity sha512-Tpp60P6IUJDTuOq/5Z8cdskzJujfwqfOTkrwIwj7IRISpnkJnT6SyJ4PCPnGMoFjC9ddhal5KVIYtAt97ix05A==
++
++ms@2.1.3:
++  version "2.1.3"
++  resolved "https://registry.yarnpkg.com/ms/-/ms-2.1.3.tgz#574c8138ce1d2b5861f0b44579dbadd60c6615b2"
++  integrity sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==
++
++mysql2@^3.10.0:
++  version "3.24.4"
++  resolved "https://registry.yarnpkg.com/mysql2/-/mysql2-3.24.4.tgz#7752de0cf10b1d2984103bdbc60f696c60756f31"
++  integrity sha512-A2olluVlj0mvgyIRRISMEzXc51m+21mRtcMVjJyIpt2GG98+XrC9m9HzsqcMsX2LcnfccJvY5NB22g8fENBnOA==
++  dependencies:
++    aws-ssl-profiles "^1.1.2"
++    generate-function "^2.3.1"
++    iconv-lite "^0.7.3"
++    long "^5.3.2"
++    lru.min "^1.1.4"
++    named-placeholders "^1.1.6"
++    sql-escaper "^1.5.1"
++
++named-placeholders@^1.1.6:
++  version "1.1.6"
++  resolved "https://registry.yarnpkg.com/named-placeholders/-/named-placeholders-1.1.6.tgz#c50c6920b43f258f59c16add1e56654f5cc02bb5"
++  integrity sha512-Tz09sEL2EEuv5fFowm419c1+a/jSMiBjI9gHxVLrVdbUkkNUUfjsVYs9pVZu5oCon/kmRh9TfLEObFtkVxmY0w==
++  dependencies:
++    lru.min "^1.1.0"
++
++negotiator@0.6.3:
++  version "0.6.3"
++  resolved "https://registry.yarnpkg.com/negotiator/-/negotiator-0.6.3.tgz#58e323a72fedc0d6f9cd4d31fe49f51479590ccd"
++  integrity sha512-+EUsqGPLsM+j/zdChZjsnX51g4XrHFOIXwfnCVPGlQk/k5giakcKsuxCObBRu6DSm9opw/O6slWbJdghQM4bBg==
++
++object-inspect@^1.13.3, object-inspect@^1.13.4:
++  version "1.13.4"
++  resolved "https://registry.yarnpkg.com/object-inspect/-/object-inspect-1.13.4.tgz#8375265e21bc20d0fa582c22e1b13485d6e00213"
++  integrity sha512-W67iLl4J2EXEGTbfeHCffrjDfitvLANg0UlX3wFUUSTx92KXRFegMHUVgSqE+wvhAbi4WqjGg9czysTV2Epbew==
++
++on-finished@~2.4.1:
++  version "2.4.1"
++  resolved "https://registry.yarnpkg.com/on-finished/-/on-finished-2.4.1.tgz#58c8c44116e54845ad57f14ab10b03533184ac3f"
++  integrity sha512-oVlzkg3ENAhCk2zdv7IJwd/QUD4z2RxRwpkcGY8psCVcCYZNq4wYnVWALHM+brtuJjePWiYF/ClmuDr8Ch5+kg==
++  dependencies:
++    ee-first "1.1.1"
++
++on-headers@~1.1.0:
++  version "1.1.0"
++  resolved "https://registry.yarnpkg.com/on-headers/-/on-headers-1.1.0.tgz#59da4f91c45f5f989c6e4bcedc5a3b0aed70ff65"
++  integrity sha512-737ZY3yNnXy37FHkQxPzt4UZ2UWPWiCZWLvFZ4fu5cueciegX0zGPnrlY6bwRg4FdQOe9YU8MkmJwGhoMybl8A==
++
++parseurl@~1.3.3:
++  version "1.3.3"
++  resolved "https://registry.yarnpkg.com/parseurl/-/parseurl-1.3.3.tgz#9da19e7bee8d12dff0513ed5b76957793bc2e8d4"
++  integrity sha512-CiyeOxFT/JZyN5m0z9PfXw4SCBJ6Sygz1Dpl0wqjlhDEGGBP1GnsUVEL0p63hoG1fcj3fHynXi9NYO4nWOL+qQ==
++
++path-to-regexp@~0.1.13:
++  version "0.1.13"
++  resolved "https://registry.yarnpkg.com/path-to-regexp/-/path-to-regexp-0.1.13.tgz#9b22ec16bc3ab88d05a0c7e369869421401ab17d"
++  integrity sha512-A/AGNMFN3c8bOlvV9RreMdrv7jsmF9XIfDeCd87+I8RNg6s78BhJxMu69NEMHBSJFxKidViTEdruRwEk/WIKqA==
++
++proxy-addr@~2.0.7:
++  version "2.0.8"
++  resolved "https://registry.yarnpkg.com/proxy-addr/-/proxy-addr-2.0.8.tgz#624e760fd8ab06b1b8320c2f8506d4422cf8e932"
++  integrity sha512-5nnx0yGyVUcY6t9RnWcARWtwT9F1D8O9rt08htPvnd49W1IgZtmLkhu9WfMzQj1cFxjHIO6connUNVW5k7AVyQ==
++  dependencies:
++    forwarded "0.2.0"
++    ipaddr.js "1.9.1"
++
++punycode@^2.3.1:
++  version "2.3.1"
++  resolved "https://registry.yarnpkg.com/punycode/-/punycode-2.3.1.tgz#027422e2faec0b25e1549c3e1bd8309b9133b6e5"
++  integrity sha512-vYt7UD1U9Wg6138shLtLOvdAu+8DsC/ilFtEVHcH+wydcSpNE20AfSOduf6MkRFahL5FY7X1oU7nKVZFtfq8Fg==
++
++qs@~6.16.0:
++  version "6.16.0"
++  resolved "https://registry.yarnpkg.com/qs/-/qs-6.16.0.tgz#c22c723a28a920f3aacdce8289fabd43eccb79fd"
++  integrity sha512-h6fhOIaRrID2CbEY2fqs+7t+UXZo+MLAnU5gRIq85uFtdiUPCdsApMlHhXogKVM4HM2DVbIjGNTTYH2OcmP1vA==
++  dependencies:
++    es-define-property "^1.0.1"
++    side-channel "^1.1.1"
++
++random-bytes@~1.0.0:
++  version "1.0.0"
++  resolved "https://registry.yarnpkg.com/random-bytes/-/random-bytes-1.0.0.tgz#4f68a1dc0ae58bd3fb95848c30324db75d64360b"
++  integrity sha512-iv7LhNVO047HzYR3InF6pUcUsPQiHTM1Qal51DcGSuZFBil1aBBWG5eHPNek7bvILMaYJ/8RU1e8w1AMdHmLQQ==
++
++range-parser@~1.2.1:
++  version "1.2.1"
++  resolved "https://registry.yarnpkg.com/range-parser/-/range-parser-1.2.1.tgz#3cf37023d199e1c24d1a55b84800c2f3e6468031"
++  integrity sha512-Hrgsx+orqoygnmhFbKaHE6c296J+HTAQXoxEF6gNupROmmGJRoyzfG3ccAveqCBrwr/2yxQ5BVd/GTl5agOwSg==
++
++raw-body@~2.5.3:
++  version "2.5.3"
++  resolved "https://registry.yarnpkg.com/raw-body/-/raw-body-2.5.3.tgz#11c6650ee770a7de1b494f197927de0c923822e2"
++  integrity sha512-s4VSOf6yN0rvbRZGxs8Om5CWj6seneMwK3oDb4lWDH0UPhWcxwOWw5+qk24bxq87szX1ydrwylIOp2uG1ojUpA==
++  dependencies:
++    bytes "~3.1.2"
++    http-errors "~2.0.1"
++    iconv-lite "~0.4.24"
++    unpipe "~1.0.0"
++
++safe-buffer@5.2.1, safe-buffer@~5.2.1:
++  version "5.2.1"
++  resolved "https://registry.yarnpkg.com/safe-buffer/-/safe-buffer-5.2.1.tgz#1eaf9fa9bdb1fdd4ec75f58f9cdb4e6b7827eec6"
++  integrity sha512-rp3So07KcdmmKbGvgaNxQSJr7bGVSVk5S9Eq1F+ppbRo70+YeaDxkw5Dd8NPN+GD6bjnYm2VuPuCXmpuYvmCXQ==
++
++"safer-buffer@>= 2.1.2 < 3", "safer-buffer@>= 2.1.2 < 3.0.0":
++  version "2.1.2"
++  resolved "https://registry.yarnpkg.com/safer-buffer/-/safer-buffer-2.1.2.tgz#44fa161b0187b9549dd84bb91802f9bd8385cd6a"
++  integrity sha512-YZo3K82SD7Riyi0E1EQPojLz7kpepnSQI9IyPbHHg1XXXevb5dJI7tpyN2ADxGcQbHG7vcyRHk0cbwqcQriUtg==
++
++send@~0.19.0, send@~0.19.1:
++  version "0.19.2"
++  resolved "https://registry.yarnpkg.com/send/-/send-0.19.2.tgz#59bc0da1b4ea7ad42736fd642b1c4294e114ff29"
++  integrity sha512-VMbMxbDeehAxpOtWJXlcUS5E8iXh6QmN+BkRX1GARS3wRaXEEgzCcB10gTQazO42tpNIya8xIyNx8fll1OFPrg==
++  dependencies:
++    debug "2.6.9"
++    depd "2.0.0"
++    destroy "1.2.0"
++    encodeurl "~2.0.0"
++    escape-html "~1.0.3"
++    etag "~1.8.1"
++    fresh "~0.5.2"
++    http-errors "~2.0.1"
++    mime "1.6.0"
++    ms "2.1.3"
++    on-finished "~2.4.1"
++    range-parser "~1.2.1"
++    statuses "~2.0.2"
++
++serve-static@~1.16.2:
++  version "1.16.3"
++  resolved "https://registry.yarnpkg.com/serve-static/-/serve-static-1.16.3.tgz#a97b74d955778583f3862a4f0b841eb4d5d78cf9"
++  integrity sha512-x0RTqQel6g5SY7Lg6ZreMmsOzncHFU7nhnRWkKgWuMTu5NN0DR5oruckMqRvacAN9d5w6ARnRBXl9xhDCgfMeA==
++  dependencies:
++    encodeurl "~2.0.0"
++    escape-html "~1.0.3"
++    parseurl "~1.3.3"
++    send "~0.19.1"
++
++setprototypeof@1.2.0, setprototypeof@~1.2.0:
++  version "1.2.0"
++  resolved "https://registry.yarnpkg.com/setprototypeof/-/setprototypeof-1.2.0.tgz#66c9a24a73f9fc28cbe66b09fed3d33dcaf1b424"
++  integrity sha512-E5LDX7Wrp85Kil5bhZv46j8jOeboKq5JMmYM3gVGdGH8xFpPWXUMsNrlODCrkoxMEeNi/XZIwuRvY4XNwYMJpw==
++
++side-channel-list@^1.0.1:
++  version "1.0.1"
++  resolved "https://registry.yarnpkg.com/side-channel-list/-/side-channel-list-1.0.1.tgz#c2e0b5a14a540aebee3bbc6c3f8666cc9b509127"
++  integrity sha512-mjn/0bi/oUURjc5Xl7IaWi/OJJJumuoJFQJfDDyO46+hBWsfaVM65TBHq2eoZBhzl9EchxOijpkbRC8SVBQU0w==
++  dependencies:
++    es-errors "^1.3.0"
++    object-inspect "^1.13.4"
++
++side-channel-map@^1.0.1:
++  version "1.0.1"
++  resolved "https://registry.yarnpkg.com/side-channel-map/-/side-channel-map-1.0.1.tgz#d6bb6b37902c6fef5174e5f533fab4c732a26f42"
++  integrity sha512-VCjCNfgMsby3tTdo02nbjtM/ewra6jPHmpThenkTYh8pG9ucZ/1P8So4u4FGBek/BjpOVsDCMoLA/iuBKIFXRA==
++  dependencies:
++    call-bound "^1.0.2"
++    es-errors "^1.3.0"
++    get-intrinsic "^1.2.5"
++    object-inspect "^1.13.3"
++
++side-channel-weakmap@^1.0.2:
++  version "1.0.2"
++  resolved "https://registry.yarnpkg.com/side-channel-weakmap/-/side-channel-weakmap-1.0.2.tgz#11dda19d5368e40ce9ec2bdc1fb0ecbc0790ecea"
++  integrity sha512-WPS/HvHQTYnHisLo9McqBHOJk2FkHO/tlpvldyrnem4aeQp4hai3gythswg6p01oSoTl58rcpiFAjF2br2Ak2A==
++  dependencies:
++    call-bound "^1.0.2"
++    es-errors "^1.3.0"
++    get-intrinsic "^1.2.5"
++    object-inspect "^1.13.3"
++    side-channel-map "^1.0.1"
++
++side-channel@^1.1.1:
++  version "1.1.1"
++  resolved "https://registry.yarnpkg.com/side-channel/-/side-channel-1.1.1.tgz#ea02c62e05dc4bea67d4442f0fb71ee192f8e0ab"
++  integrity sha512-6x6dK6zJdpTzF4sQeNYxwtvBzf6Eg4GtlesS94HOvTudUeyK2WXAaIfmDgsyslYrRBeFIlsi54AYsFGUuhmvrQ==
++  dependencies:
++    es-errors "^1.3.0"
++    object-inspect "^1.13.4"
++    side-channel-list "^1.0.1"
++    side-channel-map "^1.0.1"
++    side-channel-weakmap "^1.0.2"
++
++sparse-bitfield@^3.0.3:
++  version "3.0.3"
++  resolved "https://registry.yarnpkg.com/sparse-bitfield/-/sparse-bitfield-3.0.3.tgz#ff4ae6e68656056ba4b3e792ab3334d38273ca11"
++  integrity sha512-kvzhi7vqKTfkh0PZU+2D2PIllw2ymqJKujUcyPMd9Y75Nv4nPbGJZXNhxsgdQab2BmlDct1YnfQCguEvHr7VsQ==
++  dependencies:
++    memory-pager "^1.0.2"
++
++sql-escaper@^1.5.1:
++  version "1.5.2"
++  resolved "https://registry.yarnpkg.com/sql-escaper/-/sql-escaper-1.5.2.tgz#5b59840dc4034bd23a9b7d00501ba947a90364b7"
++  integrity sha512-6CKD38c31SENivxOADeMNLdukOnUxUcflKtzVWzace7Riv1v7cAEym5Cx9Q7gYZ3ezIJI7ZpqecQq8cqNeSSFg==
++
++statuses@~2.0.1, statuses@~2.0.2:
++  version "2.0.2"
++  resolved "https://registry.yarnpkg.com/statuses/-/statuses-2.0.2.tgz#8f75eecef765b5e1cfcdc080da59409ed424e382"
++  integrity sha512-DvEy55V3DB7uknRo+4iOGT5fP1slR8wQohVdknigZPMpMstaKJQWhwiYBACJE3Ul2pTnATihhBYnRhZQHGBiRw==
++
++toidentifier@~1.0.1:
++  version "1.0.1"
++  resolved "https://registry.yarnpkg.com/toidentifier/-/toidentifier-1.0.1.tgz#3be34321a88a820ed1bd80dfaa33e479fbb8dd35"
++  integrity sha512-o5sSPKEkg/DIQNmH43V0/uerLrpzVedkUh8tGNvaeXpfpuwjKenlSox/2O/BTlZUtEe+JG7s5YhEz608PlAHRA==
++
++tr46@^5.1.0:
++  version "5.1.1"
++  resolved "https://registry.yarnpkg.com/tr46/-/tr46-5.1.1.tgz#96ae867cddb8fdb64a49cc3059a8d428bcf238ca"
++  integrity sha512-hdF5ZgjTqgAntKkklYw0R03MG2x/bSzTtkxmIRw/sTNV8YXsCJ1tfLAX23lhxhHJlEf3CRCOCGGWw3vI3GaSPw==
++  dependencies:
++    punycode "^2.3.1"
++
++type-is@~1.6.18:
++  version "1.6.18"
++  resolved "https://registry.yarnpkg.com/type-is/-/type-is-1.6.18.tgz#4e552cd05df09467dcbc4ef739de89f2cf37c131"
++  integrity sha512-TkRKr9sUTxEH8MdfuCSP7VizJyzRNMjj2J2do2Jr3Kym598JVdEksuzPQCnlFPW4ky9Q+iA+ma9BGm06XQBy8g==
++  dependencies:
++    media-typer "0.3.0"
++    mime-types "~2.1.24"
++
++uid-safe@~2.1.5:
++  version "2.1.5"
++  resolved "https://registry.yarnpkg.com/uid-safe/-/uid-safe-2.1.5.tgz#2b3d5c7240e8fc2e58f8aa269e5ee49c0857bd3a"
++  integrity sha512-KPHm4VL5dDXKz01UuEd88Df+KzynaohSL9fBh096KWAxSKZQDI2uBrVqtvRM4rwrIrRRKsdLNML/lnaaVSRioA==
++  dependencies:
++    random-bytes "~1.0.0"
++
++unpipe@~1.0.0:
++  version "1.0.0"
++  resolved "https://registry.yarnpkg.com/unpipe/-/unpipe-1.0.0.tgz#b2bf4ee8514aae6165b4817829d21b2ef49904ec"
++  integrity sha512-pjy2bYhSsufwWlKwPc+l3cN7+wuJlK6uz0YdJEOlQDbl6jo/YlPi4mb8agUkVC8BF7V8NuzeyPNqRksA3hztKQ==
++
++utils-merge@1.0.1:
++  version "1.0.1"
++  resolved "https://registry.yarnpkg.com/utils-merge/-/utils-merge-1.0.1.tgz#9f95710f50a267947b2ccc124741c1028427e713"
++  integrity sha512-pMZTvIkT1d+TFGvDOqodOclx0QWkkgi6Tdoa8gC8ffGAAqz9pzPTZWAybbsHHoED/ztMtkv/VoYTYyShUn81hA==
++
++vary@~1.1.2:
++  version "1.1.2"
++  resolved "https://registry.yarnpkg.com/vary/-/vary-1.1.2.tgz#2299f02c6ded30d4a5961b0b9f74524a18f634fc"
++  integrity sha512-BNGbWLfd0eUPabhkXUVm0j8uuvREyTh5ovRa/dyow/BqAbZJyC+5fU+IzQOzmAKzYqYRAISoRhdQr3eIZ/PXqg==
++
++webidl-conversions@^7.0.0:
++  version "7.0.0"
++  resolved "https://registry.yarnpkg.com/webidl-conversions/-/webidl-conversions-7.0.0.tgz#256b4e1882be7debbf01d05f0aa2039778ea080a"
++  integrity sha512-VwddBukDzu71offAQR975unBIGqfKZpM+8ZX6ySk8nYhVoo5CYaZyzt3YBvYtRtO+aoGlqxPg/B87NGVZ/fu6g==
++
++"whatwg-url@^14.1.0 || ^13.0.0":
++  version "14.2.0"
++  resolved "https://registry.yarnpkg.com/whatwg-url/-/whatwg-url-14.2.0.tgz#4ee02d5d725155dae004f6ae95c73e7ef5d95663"
++  integrity sha512-De72GdQZzNTUBBChsXueQUnPKDkg/5A5zp7pFDuQAj5UFoENpiACU0wlCvzpAGnTkj++ihpKwKyYewn/XNUbKw==
++  dependencies:
++    tr46 "^5.1.0"
++    webidl-conversions "^7.0.0"
+diff --git a/07_Report/DESIGN_BRIEF.md b/07_Report/DESIGN_BRIEF.md
+new file mode 100644
+--- /dev/null
++++ b/07_Report/DESIGN_BRIEF.md
+@@ -0,0 +1,45 @@
++# MediVault — approved clinical-record design brief
++
++Written before UI changes. Scope: the twelve working screens in the supplied application; the staff-dashboard redirect and 404 remain supporting pages. The original Express application and folder structure remain authoritative.
++
++## Character and role emphasis
++
++This is a shared clinical record, not a corporate dashboard. Doctors mid-shift need precise document sections; receptionists need patient-context appointment and billing actions; patients need calm booking and readable charges; pharmacists need aligned queues and unambiguous stock consequences. Navigation and typography are shared, but density follows the job.
++
++## Six-color system
++
++| Name | Value | Meaning |
++|---|---|---|
++| Record White | #F7F8F5 | Reading surfaces |
++| Graphite | #252B2A | Text and ordinary actions |
++| Pewter | #5D6965 | Supporting information |
++| Evergreen | #315C45 | Available, completed, confirmed |
++| Oxide | #9A3543 | Errors, destructive and urgent states |
++| Caution Gold | #E7BA5C | Attention, always with Graphite text |
++
++Neutral dark surfaces and contrast-adjusted light status text preserve the same semantics in dark mode. Labels accompany color. No new clinical severity classification is introduced.
++
++## Typography and structure
++
++IBM Plex Sans carries controls, queues, forms, clinical details and tabular numbers. Source Serif 4 appears only in titles and document headings. Sentence case, normal letter spacing. Quiet neutral navigation replaces the dark sidebar. Queues are ruled rows; clinical histories are documents; billing is a ledger; statistics are unframed metric groups; forms use field groups and separate action areas. Borders and spacing replace ubiquitous shadows and rounded cards.
++
++## Signature: dispense reconciliation
++
++Give the existing dispense preview a reconciliation-record structure: available patient/prescription context, medicine identity, current stock, required quantity, remaining stock and original validation. Preserve the existing server preview and trigger stock math, including duplicate-item aggregation. No new stock reservation, simplified calculation or clinical decision support. Keep its confirmation safeguard. Booking retains its real sequence and stays visually quieter.
++
++## Will not use
++
++- Tracked-out ALL-CAPS eyebrows or single-word-highlighted headlines.
++- Decorative arrow suffixes on buttons.
++- 01/02/03 decoration except genuine sequential steps.
++- Repeated fade-and-slide-up entrances.
++- Universal pill statuses or identical shadowed rounded cards.
++- Teal/dark-slate identity, purple substitution, marketing slogans or ornamental charts.
++
++## Self-review before implementation
++
++Revised generic dashboard defaults into role-specific records, queues, ledgers and field groups. Changed all-purpose saturated primary buttons to Graphite so status colors retain meaning. Limited distinctive treatment to dispensing, rather than decorating twelve screens equally. Serif is restricted to orientation, not operational rows. These choices do not require any excluded generic tell.
++
++## Verification gates
++
++Check all twelve screens in light/dark, narrow/wide layouts, visible keyboard focus, real dialogs and print media. Preserve labels, ARIA, keyboard navigation, medicine autocomplete, all booking steps, RBAC and API contracts. Run the actual MySQL constraint failures and corrections. Verify receptionist procedure-generated bills in staff billing and the owning patient's bills. Document actual evidence and any unresolved limitation separately.

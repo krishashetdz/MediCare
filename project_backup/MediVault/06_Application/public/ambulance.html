@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ambulance · MediCare</title>
+
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link href="/assets/css/medivault-restyle.css" rel="stylesheet">
+<style>
+.ambulance-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+    gap: 1.5rem;
+    align-items: stretch;
+}
+.ambulance-card {
+    padding: 1.5rem !important;
+    background: var(--mv-surface) !important;
+    border-radius: 8px !important;
+    border: 1px solid var(--mv-border) !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05) !important;
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: space-between !important;
+    height: 100% !important;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.ambulance-card:hover {
+    border-color: var(--mv-border-strong) !important;
+}
+.ambulance-header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 1.25rem;
+}
+.ambulance-icon {
+    width: 50px !important;
+    height: 50px !important;
+    border-radius: 8px !important;
+    background: var(--mv-surface-2) !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    color: var(--mv-text) !important;
+    font-size: 20px;
+    flex-shrink: 0;
+}
+.ambulance-header h5 {
+    font-size: 1.15rem;
+    font-weight: 600;
+    margin: 0 0 0.25rem 0;
+    color: var(--mv-text);
+}
+.ambulance-info {
+    margin-bottom: 1rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--mv-border);
+}
+.ambulance-info p {
+    margin: 0.35rem 0;
+    font-size: 0.875rem;
+    color: var(--mv-text-muted);
+}
+.ambulance-info strong {
+    color: var(--mv-text);
+    font-weight: 500;
+}
+.ambulance-actions {
+    margin-top: auto;
+    padding-top: 0.75rem;
+}
+.ambulance-card .mv-btn {
+    width: 100% !important;
+    min-height: 40px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 8px !important;
+    font-weight: 500 !important;
+    border-radius: 6px !important;
+}
+</style>
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<script src="/assets/js/theme-init.js"></script>
+<script src="/runtime-config.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+
+<div class="mv-layout" id="mvShell"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/mv-core.js"></script>
+<script src="/assets/js/mv-shell.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    /* =================================================================
+       Ambulance - status cards (Available/On Duty) + assign modal.
+       Phase 5: MongoDB stores dispatch logs.
+       ================================================================= */
+
+    let ambulances = [];
+    let selectedAmb = null;
+
+    (async function init() {
+        const ctx = await MV.shell.mount({
+            roles: ['Admin', 'Receptionist'],
+            title: 'Ambulance Fleet',
+            subtitle: 'Vehicle status and dispatch'
+        });
+
+        ctx.content.innerHTML = '<div class="ambulance-grid" id="ambulanceGrid"></div>';
+
+        const modal = document.createElement('div');
+        modal.innerHTML =
+            '<div class="modal fade" id="assignModal" tabindex="-1">' +
+              '<div class="modal-dialog">' +
+                '<div class="modal-content">' +
+                  '<div class="modal-header">' +
+                    '<h5 class="modal-title">Dispatch Ambulance</h5>' +
+                    '<button type="button" class="btn-close" data-bs-dismiss="modal"></button>' +
+                  '</div>' +
+                  '<div class="modal-body">' +
+                    '<form id="assignForm">' +
+                      '<div class="mb-3">' +
+                        '<label class="form-label">Vehicle</label>' +
+                        '<input type="text" class="form-control" id="vehicleDisplay" readonly>' +
+                      '</div>' +
+                      '<div class="mb-3">' +
+                        '<label class="form-label">Patient Name</label>' +
+                        '<input type="text" class="form-control" name="patient_name" required>' +
+                      '</div>' +
+                      '<div class="mb-3">' +
+                        '<label class="form-label">Pickup Location</label>' +
+                        '<textarea class="form-control" name="pickup_location" rows="2" required></textarea>' +
+                      '</div>' +
+                      '<div class="mb-3">' +
+                        '<label class="form-label">Destination</label>' +
+                        '<input type="text" class="form-control" name="destination" value="Hospital" required>' +
+                      '</div>' +
+                      '<div class="mb-3">' +
+                        '<label class="form-label">Contact Phone</label>' +
+                        '<input type="tel" class="form-control" name="contact_phone" required>' +
+                      '</div>' +
+                    '</form>' +
+                  '</div>' +
+                  '<div class="modal-footer">' +
+                    '<button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+                    '<button type="button" class="btn btn-primary" id="submitDispatch">Dispatch</button>' +
+                  '</div>' +
+                '</div>' +
+              '</div>' +
+            '</div>';
+        document.body.appendChild(modal);
+
+        const modalInst = new bootstrap.Modal(document.getElementById('assignModal'));
+
+        document.getElementById('submitDispatch').addEventListener('click', async function () {
+            const form = document.getElementById('assignForm');
+            if (!form.checkValidity()) return form.reportValidity();
+
+            const data = Object.fromEntries(new FormData(form));
+            data.ambulance_id = selectedAmb.ambulance_id;
+
+            try {
+                const result = await MV.api.post('/api/admin/ambulance/' + selectedAmb.ambulance_id + '/dispatch', data);
+                MV.toast({ message: result.message, type: result.warning ? 'warning' : 'success' });
+                modalInst.hide();
+                form.reset();
+                loadAmbulances();
+            } catch (err) {
+                MV.toast({ message: err.message, type: 'danger' });
+            }
+        });
+
+        window.addEventListener('openAssignModal', function (e) {
+            selectedAmb = e.detail;
+            document.getElementById('vehicleDisplay').value = selectedAmb.vehicle_number;
+            modalInst.show();
+        });
+
+        loadAmbulances();
+
+        // Poll every 30s
+        setInterval(loadAmbulances, 30000);
+    })();
+
+    async function loadAmbulances() {
+        try {
+            ambulances = await MV.api.get('/api/admin/ambulances');
+            renderCards();
+        } catch (err) {
+            MV.toast({ message: 'Failed to load ambulance fleet', type: 'danger' });
+        }
+    }
+
+    function renderCards() {
+        const grid = document.getElementById('ambulanceGrid');
+        if (!grid) return;
+
+        if (!ambulances.length) {
+            grid.innerHTML = MV.emptyState({ icon: 'truck', title: 'No ambulances', text: 'Add vehicles to the fleet.' });
+            MV.icons(grid);
+            return;
+        }
+
+        let html = '';
+        ambulances.forEach(function (amb) {
+            const isAvail = amb.status === 'Available';
+            const statusTone = isAvail ? 'success' : 'warning';
+            const statusIcon = isAvail ? 'fa-circle-check' : 'fa-clock';
+
+            html += '<div class="ambulance-card">' +
+                '<div>' +
+                  '<div class="ambulance-header">' +
+                    '<div class="ambulance-icon"><i class="fas fa-truck-medical"></i></div>' +
+                    '<div style="flex:1; min-width:0">' +
+                      '<h5>' + MV.esc(amb.vehicle_number) + '</h5>' +
+                      '<span class="mv-badge is-' + statusTone + '"><i class="fas ' + statusIcon + ' me-1"></i>' + MV.esc(amb.status) + '</span>' +
+                    '</div>' +
+                  '</div>' +
+                  '<div class="ambulance-info">' +
+                    '<p><strong>Driver:</strong> ' + MV.esc(amb.driver_name || '--') + '</p>' +
+                    '<p><strong>Phone:</strong> ' + MV.esc(amb.driver_phone || '--') + '</p>' +
+                  '</div>' +
+                '</div>' +
+                '<div class="ambulance-actions">' +
+                  (isAvail
+                    ? '<button type="button" class="mv-btn mv-btn-primary w-100" onclick="assignAmbulance(' + amb.ambulance_id + ')">' +
+                        '<i class="fas fa-paper-plane me-1"></i><span>Dispatch</span>' +
+                      '</button>'
+                    : '<button type="button" class="mv-btn mv-btn-outline w-100" onclick="releaseAmbulance(' + amb.ambulance_id + ')">' +
+                        '<i class="fas fa-circle-check me-1"></i><span>Mark Available</span>' +
+                      '</button>'
+                  ) +
+                '</div>' +
+              '</div>';
+        });
+
+        grid.innerHTML = html;
+    }
+
+    window.assignAmbulance = function (id) {
+        const amb = ambulances.find(function (a) { return a.ambulance_id === id; });
+        if (amb) window.dispatchEvent(new CustomEvent('openAssignModal', { detail: amb }));
+    };
+
+    window.releaseAmbulance = async function (id) {
+        if (!await MV.confirm({title:'Mark available?',message:'The ambulance will return to the available fleet.',confirmText:'Mark available',kind:'primary'})) return;
+        try {
+            await MV.api.post('/api/admin/ambulance/' + id + '/release');
+            MV.toast({ message: 'Ambulance marked available', type: 'success' });
+            loadAmbulances();
+        } catch (err) {
+            MV.toast({ message: err.message, type: 'danger' });
+        }
+    };
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lab · MediCare</title>
+
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link href="/assets/css/medivault-restyle.css" rel="stylesheet">
+<style>
+.lab-grid {
+    display: grid !important;
+    grid-template-columns: 1fr !important;
+    gap: 1.5rem !important;
+    align-items: stretch !important;
+}
+@media (min-width: 992px) {
+    .lab-grid {
+        grid-template-columns: 1fr 1fr !important;
+    }
+}
+
+.lab-grid .mv-card {
+    background: var(--mv-surface) !important;
+    border: 1px solid var(--mv-border) !important;
+    border-radius: 8px !important;
+    overflow: hidden !important;
+    display: flex !important;
+    flex-direction: column !important;
+    height: 100% !important;
+    margin-bottom: 0 !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05) !important;
+}
+.lab-grid .mv-card-head {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    padding: 16px 20px !important;
+    border-top: none !important;
+    border-bottom: 1px solid var(--mv-border) !important;
+    background: var(--mv-surface-1) !important;
+}
+.lab-grid .mv-card-head h2 {
+    font-size: 16px !important;
+    font-weight: 600 !important;
+    margin: 0 !important;
+    color: var(--mv-text) !important;
+}
+#pendingSlot, #completedSlot {
+    flex: 1 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    background: var(--mv-surface) !important;
+}
+.test-card, .report-row {
+    padding: 16px 20px !important;
+    border-bottom: 1px solid var(--mv-border) !important;
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    gap: 1rem !important;
+    background: transparent !important;
+    transition: background 0.15s ease !important;
+}
+.test-card:last-child, .report-row:last-child {
+    border-bottom: none !important;
+}
+.test-card:hover, .report-row:hover {
+    background: var(--mv-surface-1) !important;
+}
+.test-info, .report-info {
+    flex: 1 !important;
+    min-width: 0 !important;
+}
+.test-info .patient, .report-info .patient {
+    font-weight: 600 !important;
+    font-size: 15px !important;
+    margin-bottom: 4px !important;
+    color: var(--mv-text) !important;
+}
+.test-info .meta, .report-info .meta {
+    font-size: 13px !important;
+    color: var(--mv-text-muted) !important;
+}
+.test-card .mv-btn, .report-row .mv-btn {
+    min-height: 36px !important;
+    padding: 6px 14px !important;
+    font-size: 13px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 6px !important;
+    white-space: nowrap !important;
+    flex-shrink: 0 !important;
+    border-radius: 6px !important;
+}
+.report-actions {
+    display: flex !important;
+    gap: 0.5rem !important;
+    align-items: center !important;
+}
+</style>
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<script src="/assets/js/theme-init.js"></script>
+<script src="/runtime-config.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+
+<div class="mv-layout" id="mvShell"></div>
+
+<!-- Enter results modal -->
+<div class="modal fade" id="resultsModal" tabindex="-1" aria-labelledby="resultsModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="resultsModalLabel">Enter Test Results</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body" id="resultsModalBody"></div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="mv-btn mv-btn-primary" id="submitResultsBtn">Submit Results</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- View report modal -->
+<div class="modal fade" id="viewReportModal" tabindex="-1" aria-labelledby="viewReportModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="viewReportModalLabel">Lab Report</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body" id="viewReportModalBody"></div>
+            <div class="modal-footer">
+                <button type="button" class="mv-btn mv-btn-outline" id="printReportBtn">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 6 2 18 2 18 9"></polyline><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path><rect x="6" y="14" width="12" height="8"></rect></svg>
+                    <span>Print</span>
+                </button>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/mv-core.js"></script>
+<script src="/assets/js/mv-shell.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    /* =================================================================
+       Lab - test request queue + completed reports.
+
+       Enter Results → inserts LAB_REPORT row + updates LAB_REQUEST.status.
+       View/print completed reports.
+       ================================================================= */
+
+    let resultsModalInstance, viewReportModalInstance;
+    let activeRequest = null;
+
+    (async function init() {
+        const ctx = await MV.shell.mount({
+            roles: ['Admin', 'Lab Technician'],
+            title: 'Laboratory',
+            subtitle: 'Test requests & reports'
+        });
+
+        ctx.actions.innerHTML =
+            '<button type="button" class="mv-btn mv-btn-outline" id="refreshBtn">' +
+              MV.icon('refresh-cw') + '<span>Refresh</span>' +
+            '</button>';
+        MV.icons(ctx.actions);
+
+        ctx.content.innerHTML =
+            '<div class="lab-grid">' +
+              '<div class="mv-card">' +
+                '<div class="mv-card-head">' +
+                  '<div class="d-flex align-items-center gap-2">' +
+                    '<i class="fa-solid fa-flask text-primary"></i>' +
+                    '<h2 style="margin:0;font-size:16px;font-weight:600">Pending Requests</h2>' +
+                  '</div>' +
+                  '<span class="mv-badge is-warning"><i class="fa-solid fa-clock me-1"></i>Queue</span>' +
+                '</div>' +
+                '<div id="pendingSlot"></div>' +
+              '</div>' +
+              '<div class="mv-card">' +
+                '<div class="mv-card-head">' +
+                  '<div class="d-flex align-items-center gap-2">' +
+                    '<i class="fa-solid fa-check-double text-success"></i>' +
+                    '<h2 style="margin:0;font-size:16px;font-weight:600">Completed Reports</h2>' +
+                  '</div>' +
+                  '<span class="mv-badge is-success"><i class="fa-solid fa-circle-check me-1"></i>Archived</span>' +
+                '</div>' +
+                '<div id="completedSlot"></div>' +
+              '</div>' +
+            '</div>';
+
+        document.getElementById('refreshBtn').addEventListener('click', function () {
+            loadPending();
+            loadCompleted();
+        });
+
+        resultsModalInstance = new bootstrap.Modal(document.getElementById('resultsModal'));
+        viewReportModalInstance = new bootstrap.Modal(document.getElementById('viewReportModal'));
+
+        loadPending();
+        loadCompleted();
+    })();
+
+    /* ----------------------------------------------- pending queue */
+    async function loadPending() {
+        const slot = document.getElementById('pendingSlot');
+        slot.innerHTML = Array(3).fill('').map(function () {
+            return '<div class="test-card">' +
+                '<div class="test-info">' +
+                  '<div class="mv-skeleton" style="width:160px;height:18px;margin-bottom:.25rem"></div>' +
+                  '<div class="mv-skeleton" style="width:200px;height:14px"></div>' +
+                '</div>' +
+                '<div class="mv-skeleton" style="width:110px;height:36px;border-radius:999px"></div>' +
+              '</div>';
+        }).join('');
+
+        try {
+            const rows = await MV.api.get('/api/staff/lab-tech/pending-requests');
+            if (!rows.length) {
+                slot.innerHTML = MV.emptyState({
+                    icon: 'flask', title: 'No pending requests',
+                    text: 'All test requests have been completed.'
+                });
+                MV.icons(slot);
+                return;
+            }
+
+            slot.innerHTML = rows.map(function (req) {
+                return '<div class="test-card">' +
+                    '<div class="test-info">' +
+                      '<div class="patient">' + MV.esc(req.patient_name) + '</div>' +
+                      '<div class="meta">' +
+                        MV.esc(req.test_name) + ' · Requested by ' + MV.esc(MV.fmt.docName(req.requested_by)) +
+                      '</div>' +
+                    '</div>' +
+                    '<button type="button" class="mv-btn mv-btn-primary mv-btn-sm" data-req-id="' + req.request_id + '">' +
+                      MV.icon('file-text') + '<span>Enter Results</span>' +
+                    '</button>' +
+                  '</div>';
+            }).join('');
+
+            MV.icons(slot);
+
+            slot.querySelectorAll('[data-req-id]').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    const reqId = this.getAttribute('data-req-id');
+                    const req = rows.find(function (r) { return r.request_id == reqId; });
+                    openResultsModal(req);
+                });
+            });
+
+        } catch (err) {
+            slot.innerHTML = MV.emptyState({ icon: 'wifi-off', title: 'Failed to load requests', text: err.message });
+            MV.icons(slot);
+        }
+    }
+
+    /* -------------------------------------------- completed reports */
+    async function loadCompleted() {
+        const slot = document.getElementById('completedSlot');
+        slot.innerHTML = '<div class="text-center py-4">' +
+            '<div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div>' +
+            '</div>';
+
+        try {
+            const rows = await MV.api.get('/api/staff/lab-tech/completed-reports');
+            if (!rows.length) {
+                slot.innerHTML = MV.emptyState({ icon: 'clipboard-check', title: 'No completed reports', text: 'Reports will appear here once submitted.' });
+                MV.icons(slot);
+                return;
+            }
+
+            slot.innerHTML = rows.map(function (rep) {
+                const date = new Date(rep.report_date).toLocaleString();
+                return '<div class="report-row">' +
+                    '<div class="report-info">' +
+                      '<div class="patient">' + MV.esc(rep.patient_name) + '</div>' +
+                      '<div class="meta">' + MV.esc(rep.test_name) + ' · ' + date + '</div>' +
+                    '</div>' +
+                    '<div class="report-actions">' +
+                      '<button type="button" class="mv-btn mv-btn-sm mv-btn-outline" data-report-id="' + rep.report_id + '">' +
+                        MV.icon('eye') + '<span>View</span>' +
+                      '</button>' +
+                    '</div>' +
+                  '</div>';
+            }).join('');
+
+            MV.icons(slot);
+
+            slot.querySelectorAll('[data-report-id]').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    const reportId = this.getAttribute('data-report-id');
+                    const rep = rows.find(function (r) { return r.report_id == reportId; });
+                    openViewModal(rep);
+                });
+            });
+
+        } catch (err) {
+            slot.innerHTML = MV.emptyState({ icon: 'wifi-off', title: 'Failed to load reports', text: err.message });
+            MV.icons(slot);
+        }
+    }
+
+    /* -------------------------------------------- enter results modal */
+    function openResultsModal(req) {
+        activeRequest = req;
+        const body = document.getElementById('resultsModalBody');
+
+        body.innerHTML =
+            '<div class="mb-3">' +
+              '<strong>Patient:</strong> ' + MV.esc(req.patient_name) +
+            '</div>' +
+            '<div class="mb-3">' +
+              '<strong>Test:</strong> ' + MV.esc(req.test_name) +
+            '</div>' +
+            '<div class="mb-3">' +
+              '<strong>Requested by:</strong> ' + MV.esc(MV.fmt.docName(req.requested_by)) +
+            '</div>' +
+            '<hr>' +
+            '<div class="mb-3">' +
+              '<label for="resultSummary" class="form-label">Result Summary <span class="text-danger">*</span></label>' +
+              '<textarea class="form-control" id="resultSummary" rows="6" placeholder="Enter test findings, measurements, interpretations..." required></textarea>' +
+            '</div>';
+
+        resultsModalInstance.show();
+    }
+
+    document.getElementById('submitResultsBtn').addEventListener('click', async function () {
+        const summary = document.getElementById('resultSummary').value.trim();
+        if (!summary) {
+            MV.toast.error('Validation error', 'Result summary is required');
+            return;
+        }
+
+        const btn = this;
+        const restore = MV.pending(btn, 'Submitting...');
+
+        try {
+            await MV.api.post('/api/staff/lab-tech/requests/' + activeRequest.request_id + '/report', {
+                result_summary: summary
+            });
+
+            MV.toast.success('Report generated', 'Lab report submitted successfully');
+            resultsModalInstance.hide();
+            loadPending();
+            loadCompleted();
+
+        } catch (err) {
+            MV.toast.error('Submission failed', err.message);
+        } finally {
+            restore();
+        }
+    });
+
+    /* ------------------------------------------------ view report modal */
+    async function openViewModal(rep) {
+        const body = document.getElementById('viewReportModalBody');
+
+        body.innerHTML = '<div class="text-center py-4">' +
+            '<div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div>' +
+            '</div>';
+
+        viewReportModalInstance.show();
+
+        try {
+            const full = await MV.api.get('/api/staff/lab-tech/reports/' + rep.report_id);
+            const date = new Date(full.report_date).toLocaleString();
+
+            body.innerHTML =
+                '<div class="mb-3"><strong>Report ID:</strong> ' + full.report_id + '</div>' +
+                '<div class="mb-3"><strong>Patient:</strong> ' + MV.esc(full.patient_name) + '</div>' +
+                '<div class="mb-3"><strong>Test:</strong> ' + MV.esc(full.test_name) + '</div>' +
+                '<div class="mb-3"><strong>Technician:</strong> ' + MV.esc(full.technician_name) + '</div>' +
+                '<div class="mb-3"><strong>Report Date:</strong> ' + date + '</div>' +
+                '<hr>' +
+                '<h6>Results:</h6>' +
+                '<div class="border rounded p-3" style="white-space:pre-wrap;font-family:monospace;font-size:.875rem">' +
+                  MV.esc(full.result_summary) +
+                '</div>';
+
+        } catch (err) {
+            body.innerHTML = '<p class="text-danger mb-0">Failed to load report: ' + MV.esc(err.message) + '</p>';
+        }
+    }
+
+    document.getElementById('printReportBtn').addEventListener('click', function () {
+        window.print();
+    });
+})();
+</script>
+
+<style media="print">
+@page { margin: 2cm; }
+body * { visibility: hidden; }
+#viewReportModal, #viewReportModal * { visibility: visible; }
+#viewReportModal { position: absolute; left: 0; top: 0; width: 100%; }
+.modal-header .btn-close, .modal-footer { display: none !important; }
+</style>
+</body>
+</html>

@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Doctor Dashboard · MediCare</title>
+
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link href="/assets/css/medivault-restyle.css" rel="stylesheet">
+<link rel="stylesheet" href="/assets/css/clinical-record.css">
+<script src="/assets/js/theme-init.js"></script>
+<script src="/runtime-config.js"></script>
+<style>
+.schedule-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.timeline { max-width: 900px; margin: 0 auto; }
+.timeline-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 18px;
+    margin-bottom: 12px;
+    background: var(--mv-surface);
+    border-radius: var(--mv-radius-card);
+    border: 1px solid var(--mv-border);
+    transition: all 0.15s;
+}
+.timeline-item:hover {
+    box-shadow: var(--mv-shadow);
+}
+.timeline-left {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex: 1;
+    min-width: 0;
+}
+.timeline-time {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--mv-primary);
+    white-space: nowrap;
+    padding: 4px 10px;
+    background: rgba(49, 92, 69, 0.08);
+    border-radius: var(--mv-radius-pill);
+}
+.timeline-content { flex: 1; min-width: 0; }
+.timeline-content h5 {
+    font-size: 14.5px;
+    font-weight: 600;
+    margin: 0;
+}
+.timeline-content p {
+    font-size: 12px;
+    color: var(--mv-text-muted);
+    margin: 0;
+}
+.timeline-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+/* HERO: Prescription builder */
+.rx-builder {
+    margin-top: 24px;
+    padding: 20px;
+    background: var(--mv-bg);
+    border-radius: var(--mv-radius-card);
+}
+.rx-builder h6 {
+    font-size: 15px;
+    font-weight: 600;
+    margin: 0 0 16px;
+}
+.rx-item {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr 1fr auto;
+    gap: 12px;
+    align-items: end;
+    margin-bottom: 12px;
+}
+.rx-item label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--mv-text-muted);
+    margin-bottom: 4px;
+    display: block;
+}
+.rx-item input,
+.rx-item select {
+    font-size: 13px;
+    padding: 6px 10px;
+}
+.rx-add-btn {
+    margin-top: 12px;
+}
+</style>
+<script src="/assets/js/theme-init.js"></script>
+<script src="/runtime-config.js"></script>
+<script src="/assets/js/record-accessibility.js" defer></script>
+</head>
+<body>
+
+<div class="mv-layout" id="mvShell"></div>
+
+<!-- Consultation modal -->
+<div class="modal fade" id="consultModal" tabindex="-1" data-bs-backdrop="static">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Consultation</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="consultBody"></div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="mv-btn mv-btn-primary" id="saveConsultation">Complete</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/js/mv-core.js"></script>
+<script src="/assets/js/mv-shell.js"></script>
+<script>
+(function () {
+    'use strict';
+
+    /* Doctor Dashboard - HERO is prescription builder with medicine autocomplete */
+
+    let schedule = [];
+    let selectedAppt = null;
+    let rxItems = [];
+    let medicines = [];
+    let consultModalInst;
+
+    (async function init() {
+        const ctx = await MV.shell.mount({
+            roles: ['Doctor'],
+            title: 'My Schedule',
+            subtitle: 'Today'
+        });
+
+        ctx.content.innerHTML =
+            '<div class="schedule-stats" id="scheduleStats"></div>' +
+            '<div class="timeline" id="scheduleTimeline"></div>' +
+            '<div class="mv-footer">' +
+              'MediCare - Hospital Management System' +
+            '</div>';
+
+        consultModalInst = new bootstrap.Modal(document.getElementById('consultModal'));
+
+        document.getElementById('saveConsultation').addEventListener('click', handleSaveConsultation);
+
+        loadSchedule();
+        loadMedicines();
+    })();
+
+    async function loadSchedule() {
+        const stats = document.getElementById('scheduleStats');
+        const timeline = document.getElementById('scheduleTimeline');
+
+        stats.innerHTML = Array(3).fill('<div class="mv-stat"><div class="mv-skeleton" style="width:40px;height:28px;margin:0 auto 8px"></div><div class="mv-skeleton" style="width:60px;height:12px;margin:0 auto"></div></div>').join('');
+        timeline.innerHTML = Array(3).fill('<div class="timeline-item"><div class="mv-skeleton" style="width:50px;height:40px"></div><div style="flex:1"><div class="mv-skeleton" style="width:120px;height:14px;margin-bottom:8px"></div><div class="mv-skeleton" style="width:80px;height:12px"></div></div></div>').join('');
+
+        try {
+            schedule = await MV.api.get('/api/doctor/schedule');
+
+            const today = new Date().toISOString().slice(0, 10);
+            const todayCount = schedule.filter(function (a) { return a.appointment_date && a.appointment_date.slice(0, 10) === today; }).length;
+            const pendingCount = schedule.filter(function (a) { return a.status === 'Scheduled'; }).length;
+            const confirmedCount = schedule.filter(function (a) { return a.status === 'Confirmed'; }).length;
+            const completedCount = schedule.filter(function (a) { return a.status === 'Completed'; }).length;
+
+            stats.innerHTML =
+                '<div class="mv-stat"><div class="mv-stat-value">' + todayCount + '</div><div class="mv-stat-label">Today</div></div>' +
+                '<div class="mv-stat"><div class="mv-stat-value">' + pendingCount + '</div><div class="mv-stat-label">Pending Approval</div></div>' +
+                '<div class="mv-stat"><div class="mv-stat-value">' + confirmedCount + '</div><div class="mv-stat-label">Confirmed</div></div>' +
+                '<div class="mv-stat"><div class="mv-stat-value">' + completedCount + '</div><div class="mv-stat-label">Completed</div></div>';
+
+            if (!schedule.length) {
+                timeline.innerHTML = '<div class="mv-empty"><div class="mv-empty-icon"><i class="fas fa-calendar"></i></div>' +
+                    '<p class="mv-empty-title">No appointments today or upcoming</p></div>';
+                return;
+            }
+
+            // Group by date
+            const byDate = {};
+            schedule.forEach(function (appt) {
+                const d = appt.appointment_date ? appt.appointment_date.slice(0, 10) : 'Unknown';
+                if (!byDate[d]) byDate[d] = [];
+                byDate[d].push(appt);
+            });
+
+            let html = '';
+            Object.keys(byDate).sort().forEach(function (dateKey) {
+                const isToday = dateKey === today;
+                const dateLabel = isToday ? 'Today - ' + MV.fmt.dateIndian(dateKey) : MV.fmt.dateIndian(dateKey);
+                html += '<div style="font-size:12px;font-weight:600;color:var(--mv-text-muted);text-transform:uppercase;letter-spacing:0.5px;margin:16px 0 8px;padding:0 4px">' + MV.esc(dateLabel) + '</div>';
+                byDate[dateKey].forEach(function (appt) {
+                    let statusBadge = '';
+                    let actionButtons = '';
+
+                    if (appt.status === 'Scheduled') {
+                        statusBadge = '<span class="mv-badge is-warning"><i class="fas fa-clock me-1"></i>New Booking</span>';
+                        actionButtons =
+                            '<button type="button" class="mv-btn mv-btn-primary mv-btn-sm" onclick="setApptStatus(' + appt.appointment_id + ', \'Confirmed\')">' +
+                              '<i class="fas fa-check me-1"></i>Accept' +
+                            '</button>' +
+                            '<button type="button" class="mv-btn mv-btn-outline mv-btn-sm" onclick="openConsultation(' + appt.appointment_id + ')">' +
+                              '<i class="fas fa-stethoscope me-1"></i>Consult' +
+                            '</button>' +
+                            '<button type="button" class="mv-btn mv-btn-ghost mv-btn-sm text-danger" title="Decline appointment" onclick="setApptStatus(' + appt.appointment_id + ', \'Cancelled\')">' +
+                              '<i class="fas fa-times"></i>' +
+                            '</button>';
+                    } else if (appt.status === 'Confirmed') {
+                        statusBadge = '<span class="mv-badge is-info"><i class="fas fa-check-circle me-1"></i>Confirmed</span>';
+                        actionButtons =
+                            '<button type="button" class="mv-btn mv-btn-primary mv-btn-sm" onclick="openConsultation(' + appt.appointment_id + ')">' +
+                              '<i class="fas fa-stethoscope me-1"></i>Start Consultation' +
+                            '</button>' +
+                            '<button type="button" class="mv-btn mv-btn-ghost mv-btn-sm text-danger" title="Cancel appointment" onclick="setApptStatus(' + appt.appointment_id + ', \'Cancelled\')">' +
+                              '<i class="fas fa-times"></i>' +
+                            '</button>';
+                    } else if (appt.status === 'Completed') {
+                        statusBadge = '<span class="mv-badge is-success"><i class="fas fa-check-double me-1"></i>Completed</span>';
+                        actionButtons = '<span style="font-size:12px;color:var(--mv-text-muted);font-weight:500;"><i class="fas fa-check-circle text-success me-1"></i>Finished</span>';
+                    } else {
+                        statusBadge = '<span class="mv-badge is-danger"><i class="fas fa-ban me-1"></i>Cancelled</span>';
+                        actionButtons = '<span style="font-size:12px;color:var(--mv-text-muted);">Cancelled</span>';
+                    }
+
+                    html += '<div class="timeline-item">' +
+                        '<div class="timeline-left">' +
+                          '<div class="timeline-time">' + MV.fmt.time12(appt.appointment_time) + '</div>' +
+                          '<div class="timeline-content">' +
+                            '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:3px;">' +
+                              '<h5>' + MV.esc(appt.patient_name) + '</h5>' +
+                              statusBadge +
+                            '</div>' +
+                            '<p>' +
+                              (appt.patient_phone ? '<span class="me-3"><i class="fas fa-phone-alt me-1"></i>' + MV.esc(appt.patient_phone) + '</span>' : '') +
+                              (appt.patient_email ? '<span><i class="fas fa-envelope me-1"></i>' + MV.esc(appt.patient_email) + '</span>' : '') +
+                            '</p>' +
+                          '</div>' +
+                        '</div>' +
+                        '<div class="timeline-actions">' + actionButtons + '</div>' +
+                      '</div>';
+                });
+            });
+            timeline.innerHTML = html;
+
+        } catch (err) {
+            timeline.innerHTML = '<div class="mv-empty"><p class="mv-empty-text">Failed to load schedule</p></div>';
+        }
+    }
+
+    window.setApptStatus = async function (appointmentId, newStatus) {
+        if (newStatus === 'Cancelled') {
+            const confirmed = window.confirm('Are you sure you want to decline / cancel this appointment?');
+            if (!confirmed) return;
+        }
+        try {
+            await MV.api.patch('/api/doctor/appointments/' + appointmentId + '/status', { status: newStatus });
+            MV.toast.success(newStatus === 'Confirmed' ? 'Appointment accepted & confirmed' : 'Appointment cancelled');
+            loadSchedule();
+        } catch (err) {
+            MV.toast.error('Action failed', err.message);
+        }
+    };
+
+    async function loadMedicines() {
+        try {
+            medicines = await MV.api.get('/api/doctor/medicines/search?q=');
+        } catch (err) {
+            medicines = [];
+        }
+    }
+
+    window.openConsultation = async function (appointmentId) {
+        selectedAppt = schedule.find(function (a) { return a.appointment_id === appointmentId; });
+        if (!selectedAppt) return;
+
+        rxItems = [{ medicine_id: null, medicine_name: '', dosage: '', duration_days: '', quantity: '' }];
+
+        const body = document.getElementById('consultBody');
+        body.innerHTML = '<div class="text-center py-4"><div class="spinner-border text-primary"></div></div>';
+        consultModalInst.show();
+
+        try {
+            const history = await MV.api.get('/api/doctor/patients/' + selectedAppt.patient_id + '/history');
+
+            body.innerHTML =
+                '<div style="margin-bottom:24px">' +
+                  '<h6 style="font-size:16px;font-weight:600;margin:0 0 8px">Patient: ' + MV.esc(selectedAppt.patient_name) + '</h6>' +
+                  '<p style="font-size:12px;color:var(--mv-text-muted);margin:0">Appointment: ' + MV.fmt.time12(selectedAppt.appointment_time) + '</p>' +
+                '</div>' +
+
+                '<section class="rx-history"><h6>Clinical history</h6>' +
+                  (history.records.length ? history.records.map(r=>'<p>'+MV.fmt.date(r.created_at)+' · '+MV.esc(r.diagnosis_summary)+'</p>').join('') : '<p class="text-muted">No earlier medical records.</p>') +
+                '</section>' +
+                '<form id="consultForm">' +
+                  '<div class="mb-3">' +
+                    '<label class="form-label">Symptoms</label>' +
+                    '<textarea class="form-control" name="symptoms" rows="2" required></textarea>' +
+                  '</div>' +
+                  '<div class="mb-3">' +
+                    '<label class="form-label">Diagnosis</label>' +
+                    '<textarea class="form-control" name="diagnosis" rows="2" required></textarea>' +
+                  '</div>' +
+                  '<div class="mb-3">' +
+                    '<label class="form-label">Notes</label>' +
+                    '<textarea class="form-control" name="notes" rows="2"></textarea>' +
+                  '</div>' +
+                '</form>' +
+
+                '<div class="rx-builder">' +
+                  '<h6>Prescription</h6>' +
+                  '<div id="rxContainer"></div>' +
+                  '<button type="button" class="mv-btn mv-btn-outline mv-btn-sm rx-add-btn" onclick="addRxItem()">' +
+                    '<i class="fas fa-plus"></i> Add Medicine' +
+                  '</button>' +
+                '</div>' +
+
+                '<div class="mt-4 p-3" style="background:var(--mv-surface-1);border:1px solid var(--mv-border);border-radius:6px">' +
+                  '<div class="d-flex align-items-center justify-content-between">' +
+                    '<div class="d-flex align-items-center gap-2">' +
+                      '<i class="fas fa-bed text-warning fs-5"></i>' +
+                      '<div>' +
+                        '<strong style="font-size:14px;color:var(--mv-text)">Inpatient Admission Recommendation</strong>' +
+                        '<div style="font-size:12px;color:var(--mv-text-muted)">Notify ward nurses to allocate a bed if this patient requires hospitalization</div>' +
+                      '</div>' +
+                    '</div>' +
+                    '<div class="form-check form-switch m-0">' +
+                      '<input class="form-check-input" type="checkbox" id="recommendAdmission" onchange="toggleAdmissionFields(this.checked)" style="cursor:pointer;width:38px;height:20px">' +
+                    '</div>' +
+                  '</div>' +
+                  '<div id="admissionFields" style="display:none;margin-top:14px;padding-top:14px;border-top:1px solid var(--mv-border)">' +
+                    '<div class="row g-2">' +
+                      '<div class="col-md-4">' +
+                        '<label class="form-label" style="font-size:12px">Recommended Ward</label>' +
+                        '<select class="form-select form-select-sm" id="admissionWard">' +
+                          '<option value="General Ward" selected>General Ward</option>' +
+                          '<option value="ICU">ICU (Intensive Care Unit)</option>' +
+                          '<option value="Emergency Ward">Emergency / Observation Ward</option>' +
+                          '<option value="Pediatric Ward">Pediatric Ward</option>' +
+                        '</select>' +
+                      '</div>' +
+                      '<div class="col-md-3">' +
+                        '<label class="form-label" style="font-size:12px">Acuity / Priority</label>' +
+                        '<select class="form-select form-select-sm" id="admissionPriority">' +
+                          '<option value="Urgent" selected>Urgent</option>' +
+                          '<option value="Critical">Critical</option>' +
+                          '<option value="Standard">Standard</option>' +
+                        '</select>' +
+                      '</div>' +
+                      '<div class="col-md-5">' +
+                        '<label class="form-label" style="font-size:12px">Clinical Reason for Inpatient Care</label>' +
+                        '<input type="text" class="form-control form-control-sm" id="admissionReason" placeholder="e.g. Requires IV therapy, continuous monitoring, post-consult observation">' +
+                      '</div>' +
+                    '</div>' +
+                  '</div>' +
+                '</div>';
+
+            renderRxItems();
+
+        } catch (err) {
+            body.innerHTML = '<p class="text-danger">Failed to load patient data</p>';
+        }
+    };
+
+    window.toggleAdmissionFields = function (checked) {
+        const el = document.getElementById('admissionFields');
+        if (el) el.style.display = checked ? 'block' : 'none';
+    };
+
+    function renderRxItems() {
+        const container = document.getElementById('rxContainer');
+        if (!container) return;
+
+        container.innerHTML =
+            '<div class="table-responsive">' +
+              '<table class="table table-borderless align-middle mb-2" style="font-size:13px">' +
+                '<thead><tr class="text-muted" style="font-size:11.5px;text-transform:uppercase;letter-spacing:0.5px">' +
+                  '<th style="width:26%;padding:4px 8px">Medicine</th>' +
+                  '<th style="width:16%;padding:4px 8px">Dosage</th>' +
+                  '<th style="width:28%;padding:4px 8px">Timing / Frequency</th>' +
+                  '<th style="width:12%;padding:4px 8px">Duration (Days)</th>' +
+                  '<th style="width:12%;padding:4px 8px">Quantity</th>' +
+                  '<th style="width:6%;padding:4px 8px"></th>' +
+                '</tr></thead>' +
+                '<tbody>' +
+                rxItems.map(function (item, idx) {
+                    return '<tr>' +
+                        '<td style="padding:4px 8px">' +
+                          '<input type="text" class="form-control form-control-sm" list="medicineList" placeholder="Search medicine..." ' +
+                            'value="' + MV.esc(item.medicine_name) + '" ' +
+                            'onchange="updateRxMedicine(' + idx + ', this.value)">' +
+                        '</td>' +
+                        '<td style="padding:4px 8px">' +
+                          '<input type="text" class="form-control form-control-sm" placeholder="e.g. 500mg" ' +
+                            'value="' + MV.esc(item.dosage) + '" ' +
+                            'onchange="updateRxField(' + idx + ', \'dosage\', this.value)">' +
+                        '</td>' +
+                        '<td style="padding:4px 8px">' +
+                          '<input type="text" class="form-control form-control-sm" list="timingList" placeholder="e.g. Morning 1, After lunch..." ' +
+                            'value="' + MV.esc(item.instructions || '') + '" ' +
+                            'onchange="updateRxField(' + idx + ', \'instructions\', this.value)">' +
+                        '</td>' +
+                        '<td style="padding:4px 8px">' +
+                          '<input type="number" class="form-control form-control-sm" placeholder="7" ' +
+                            'value="' + (item.duration_days || '') + '" ' +
+                            'onchange="updateRxField(' + idx + ', \'duration_days\', this.value)">' +
+                        '</td>' +
+                        '<td style="padding:4px 8px">' +
+                          '<input type="number" class="form-control form-control-sm" placeholder="14" ' +
+                            'value="' + (item.quantity || '') + '" ' +
+                            'onchange="updateRxField(' + idx + ', \'quantity\', this.value)">' +
+                        '</td>' +
+                        '<td style="padding:4px 8px;text-align:center">' +
+                          (rxItems.length > 1 ? '<button type="button" class="mv-btn mv-btn-ghost mv-btn-icon mv-btn-sm text-danger" title="Remove" onclick="removeRxItem(' + idx + ')">' +
+                            '<i class="fas fa-trash-alt"></i></button>' : '') +
+                        '</td>' +
+                      '</tr>';
+                }).join('') +
+                '</tbody>' +
+              '</table>' +
+            '</div>' +
+            '<datalist id="medicineList">' +
+              medicines.map(function (m) {
+                  return '<option value="' + MV.esc(m.medicine_name) + '">';
+              }).join('') +
+            '</datalist>' +
+            '<datalist id="timingList">' +
+              '<option value="Morning 1 tablet (After breakfast)">' +
+              '<option value="Evening 1 tablet (After dinner)">' +
+              '<option value="Morning 1, Evening 1 (Twice daily after food)">' +
+              '<option value="Morning 1, Afternoon 1, Evening 1 (Thrice daily)">' +
+              '<option value="After Lunch">' +
+              '<option value="After Dinner">' +
+              '<option value="Before Food (Empty stomach morning)">' +
+              '<option value="Bedtime (Night 1 tablet)">' +
+              '<option value="As needed for pain/fever (SOS)">' +
+            '</datalist>';
+    }
+
+    window.addRxItem = function () {
+        rxItems.push({ medicine_id: null, medicine_name: '', dosage: '', instructions: 'Morning 1, Evening 1', duration_days: '', quantity: '' });
+        renderRxItems();
+    };
+
+    window.removeRxItem = function (idx) {
+        rxItems.splice(idx, 1);
+        renderRxItems();
+    };
+
+    window.updateRxMedicine = function (idx, name) {
+        const med = medicines.find(function (m) { return m.medicine_name === name; });
+        rxItems[idx].medicine_name = name;
+        rxItems[idx].medicine_id = med ? med.medicine_id : null;
+    };
+
+    window.updateRxField = function (idx, field, value) {
+        rxItems[idx][field] = value;
+    };
+
+    async function handleSaveConsultation() {
+        const form = document.getElementById('consultForm');
+        if (!form || !form.checkValidity()) {
+            if (form) form.reportValidity();
+            return;
+        }
+
+        const formData = Object.fromEntries(new FormData(form));
+        const btn = document.getElementById('saveConsultation');
+        const restore = MV.pending(btn, 'Saving...');
+
+        const recommendAdmission = document.getElementById('recommendAdmission')?.checked || false;
+        const recommendedWard = document.getElementById('admissionWard')?.value || 'General Ward';
+        const admissionPriority = document.getElementById('admissionPriority')?.value || 'Urgent';
+        const admissionReason = document.getElementById('admissionReason')?.value || '';
+
+        try {
+            // Save consultation + admission recommendation
+            const consultRes = await MV.api.post('/api/doctor/consultations', {
+                appointment_id: selectedAppt.appointment_id,
+                symptoms: formData.symptoms,
+                diagnosis: formData.diagnosis,
+                notes: formData.notes,
+                recommend_admission: recommendAdmission,
+                recommended_ward: recommendedWard,
+                admission_priority: admissionPriority,
+                admission_reason: admissionReason
+            });
+
+            // Save prescription if any items filled
+            const validItems = rxItems.filter(function (item) {
+                return item.medicine_id && item.dosage && item.duration_days && item.quantity;
+            }).map(function (item) {
+                return {
+                    medicine_id: item.medicine_id,
+                    dosage: item.dosage,
+                    instructions: item.instructions || '',
+                    duration_days: item.duration_days,
+                    quantity: item.quantity
+                };
+            });
+
+            if (validItems.length > 0) {
+                await MV.api.post('/api/doctor/prescriptions', {
+                    consultation_id: consultRes.consultation_id,
+                    patient_id: selectedAppt.patient_id,
+                    items: validItems
+                });
+            }
+
+            const successMsg = recommendAdmission 
+                ? 'Consultation saved & admission request sent to Nurse Station' 
+                : 'Consultation saved successfully';
+            MV.toast.success(successMsg);
+            consultModalInst.hide();
+            loadSchedule();
+
+        } catch (err) {
+            MV.toast.error('Save failed', err.message);
+        } finally {
+            restore();
+        }
+    }
+})();
+</script>
+</body>
+</html>
