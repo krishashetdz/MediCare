@@ -265,7 +265,7 @@
 
     (async function init() {
         const ctx = await MV.shell.mount({
-            roles: ['Admin', 'Nurse', 'Lab Technician', 'Pharmacist', 'Receptionist'],
+            roles: ['Admin', 'Doctor', 'Nurse', 'Lab Technician', 'Pharmacist', 'Receptionist'],
             title: 'Staff Portal',
             subtitle: 'Appointments, care, nursing and clinical services'
         });
@@ -687,7 +687,6 @@
                   '</tr>';
             });
 
-            if (patients && patients.length) {
                 html += '</tbody></table></div></div>';
             } else {
                 html += '<div class="alert alert-secondary py-3 text-center" style="font-size:13px"><i class="fas fa-info-circle me-1"></i>No inpatients currently admitted. Process pending admission requests above to assign beds.</div>';
@@ -786,7 +785,12 @@
         sel.innerHTML = '<option value="">Loading beds...</option>';
 
         try {
-            const allBeds = await MV.api.get('/api/admin/beds');
+            let allBeds = [];
+            try {
+                allBeds = await MV.api.get('/api/admin/beds');
+            } catch (_) {
+                allBeds = await MV.api.get('/api/staff/nurse/available-beds');
+            }
             sel.innerHTML = '<option value="">Choose available bed...</option>';
             allBeds.filter(function (b) { return b.status === 'Available'; }).forEach(function (b) {
                 const opt = document.createElement('option');
