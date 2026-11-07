@@ -19,7 +19,7 @@ const app = document.getElementById('app');
 async function init() {
     const me = await (await fetch('/api/auth/me')).json();
     if (!me.role) { window.location.href = '/login.html'; return; }
-    document.getElementById('navTitle').textContent = `🏥 MediVault - ${me.role}`;
+    document.getElementById('navTitle').textContent = `🏥 MediCare - ${me.role}`;
     if (me.role === 'Nurse') renderNurse();
     else if (me.role === 'Lab Technician') renderLabTech();
     else if (me.role === 'Pharmacist') renderPharmacist();

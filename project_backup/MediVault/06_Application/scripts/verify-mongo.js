@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * scripts/verify-mongo.js
- * Prints document counts and one sample document for each MongoDB collection used by MediVault:
+ * Prints document counts and one sample document for each MongoDB collection used by MediCare:
  *   - lab_reports_raw
  *   - audit_log
  *   - ambulance_dispatch_log
@@ -23,7 +23,7 @@ async function verifyMongo() {
     }
 
     const db = await connectMongo();
-    console.log('=== MediVault MongoDB Collection Verification ===\n');
+    console.log('=== MediCare MongoDB Collection Verification ===\n');
 
     for (const colName of COLLECTIONS) {
         const col = db.collection(colName);

@@ -378,14 +378,21 @@ router.post('/ambulance/:id/dispatch', requireRole('Admin', 'Receptionist'), asy
                 const [[emgDept]] = await conn.query(
                     "SELECT department_id FROM DEPARTMENT WHERE department_name = 'Emergency Medicine' LIMIT 1"
                 );
+                const [[existingPatient]] = await conn.query(
+                    `SELECT p.patient_id FROM PATIENT p JOIN \`USER\` u ON p.patient_id = u.user_id
+                     WHERE u.name = ? OR (u.phone IS NOT NULL AND u.phone = ?) LIMIT 1`,
+                    [patient_name.trim(), contact_phone.trim()]
+                );
+                const resolvedPatientId = existingPatient ? existingPatient.patient_id : null;
                 const [caseIns] = await conn.query(
                     `INSERT INTO EMERGENCY_CASE (
-                        emg_number, temp_patient_name, contact_phone, arrival_time, arrival_method,
+                        emg_number, patient_id, temp_patient_name, contact_phone, arrival_time, arrival_method,
                         ambulance_id, initial_complaint, triage_priority, status, department_id
-                    ) VALUES (?, ?, ?, NOW(), 'Ambulance', ?, ?, ?, 'Waiting', ?)`,
+                    ) VALUES (?, ?, ?, ?, NOW(), 'Ambulance', ?, ?, ?, 'Waiting', ?)`,
                     [
                         linkedEmgNumber,
-                        patient_name.trim(),
+                        resolvedPatientId,
+                        resolvedPatientId ? null : patient_name.trim(),
                         contact_phone.trim(),
                         Number(req.params.id),
                         (initial_complaint && initial_complaint.trim()) || `Ambulance dispatch pickup from ${pickup_location.trim()}`,

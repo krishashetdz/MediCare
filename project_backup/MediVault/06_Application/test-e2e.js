@@ -282,6 +282,17 @@ async function runTests() {
         const crossDocHist = await doc2Client.request('GET', `/api/doctor/patients/${newPatientId}/history`);
         assert(crossDocHist.status === 403, 'Ownership: Doctor 2 blocked from viewing unassociated patient history (403)');
 
+        const badConsultRx = await doc1Client.request('POST', '/api/doctor/consultations', {
+            appointment_id: newApptId,
+            symptoms: 'Exertional dyspnea, occasional palpitations',
+            diagnosis: 'Paroxysmal Atrial Fibrillation',
+            notes: 'Invalid medicine test',
+            prescription_items: [
+                { medicine_id: 999999, dosage: '250mg', duration_days: 5, quantity: 10 }
+            ]
+        });
+        assert(badConsultRx.status === 400, 'Atomic consultation+prescription save rolls back consultation when prescription item has invalid medicine_id (400)');
+
         const consultRes = await doc1Client.request('POST', '/api/doctor/consultations', {
             appointment_id: newApptId,
             symptoms: 'Exertional dyspnea, occasional palpitations',
@@ -294,6 +305,17 @@ async function runTests() {
         });
         assert(consultRes.status === 201 && consultRes.data.consultation_id, 'Doctor records consultation, MEDICAL_RECORD, and ADMISSION_REQUEST');
         const newConsultId = consultRes.data.consultation_id;
+
+        const retryConsult = await doc1Client.request('POST', '/api/doctor/consultations', {
+            appointment_id: newApptId,
+            symptoms: 'Exertional dyspnea, occasional palpitations',
+            diagnosis: 'Paroxysmal Atrial Fibrillation',
+            notes: 'Initiating rate control and ordering Urgent Lipid Profile. Recommending ICU telemetry observation.'
+        });
+        assert(
+            retryConsult.status === 201 && retryConsult.data.consultation_id === newConsultId,
+            'Idempotent consultation retry updates existing consultation_id without creating duplicate CONSULTATION row'
+        );
 
         const reschedCompleted = await recClient.request('POST', `/api/staff/receptionist/appointments/${newApptId}/reschedule`, {
             appointment_date: futureDate,

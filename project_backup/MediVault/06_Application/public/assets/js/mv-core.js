@@ -1,5 +1,5 @@
 /* =====================================================================
-   MediVault DS -- core runtime (no build step, no framework)
+   MediCare DS -- core runtime (no build step, no framework)
 
    Everything shared by every page lives here: theme, API wrapper, toasts,
    confirm dialog, form validation, and the DataTable controller that gives

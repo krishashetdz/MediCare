@@ -1,5 +1,5 @@
 /* =====================================================================
-   MediVault DS -- app shell
+   MediCare DS -- app shell
 
    Renders neutral role-aware navigation and a record-context header into
    <div id="mvShell"></div>, then hands the page its own <main> to fill.

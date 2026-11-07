@@ -1035,6 +1035,17 @@ router.post('/admit/:id', requireRole('Admin', 'Doctor'), async (req, res) => {
         ward_name = targetBed.ward_name;
 
         let patientId = ec.patient_id;
+        if (!patientId && ec.temp_patient_name) {
+            const [[matchedPt]] = await conn.query(
+                `SELECT p.patient_id FROM PATIENT p JOIN \`USER\` u ON p.patient_id = u.user_id
+                 WHERE u.name = ? AND (? IS NULL OR u.phone = ?) LIMIT 1`,
+                [ec.temp_patient_name, ec.contact_phone || null, ec.contact_phone || null]
+            );
+            if (matchedPt) {
+                patientId = matchedPt.patient_id;
+                await conn.query('UPDATE EMERGENCY_CASE SET patient_id = ? WHERE case_id = ?', [patientId, req.params.id]);
+            }
+        }
         if (!patientId) {
             const patientName = ec.temp_patient_name || ('Emergency Patient ' + ec.emg_number);
             const tempHash = await bcrypt.hash('emg_temp_' + Date.now(), 10);

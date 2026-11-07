@@ -156,25 +156,56 @@ async function fetchPatientLabReports(patientId) {
     }
 }
 
-// Patient history -- medical records, consultations, and lab reports for an owned patient
+// Patient history -- demographics/allergies, medical records, consultations, prescriptions, and lab reports for an owned patient
 router.get('/patients/:patientId/history', async (req, res) => {
     const allowed = await doctorOwnsPatient(req.session.user.id, req.params.patientId);
     if (!allowed) {
         return res.status(403).json({ error: 'Access denied: you can only view history for your own patients' });
     }
 
+    const [[patient]] = await mysqlPool.query(
+        `SELECT p.patient_id, u.name, u.email, u.phone, p.dob,
+                TIMESTAMPDIFF(YEAR, p.dob, CURDATE()) AS age,
+                p.gender, p.blood_group, p.address, p.emergency_contact,
+                COALESCE(vpa.allergies, 'None documented') AS allergies
+         FROM PATIENT p
+         JOIN \`USER\` u ON p.patient_id = u.user_id
+         LEFT JOIN vw_patient_allergies vpa ON p.patient_id = vpa.patient_id
+         WHERE p.patient_id = ?`,
+        [req.params.patientId]
+    );
+
     const [records] = await mysqlPool.query(
-        'SELECT * FROM MEDICAL_RECORD WHERE patient_id = ? ORDER BY created_at DESC',
+        `SELECT mr.*, ud.name AS doctor_name
+         FROM MEDICAL_RECORD mr
+         LEFT JOIN \`USER\` ud ON mr.doctor_id = ud.user_id
+         WHERE mr.patient_id = ?
+         ORDER BY mr.created_at DESC`,
         [req.params.patientId]
     );
     const [consultations] = await mysqlPool.query(
-        `SELECT c.* FROM CONSULTATION c
+        `SELECT c.*, a.appointment_date, a.appointment_time, ud.name AS doctor_name
+         FROM CONSULTATION c
          JOIN APPOINTMENT a ON c.appointment_id = a.appointment_id
-         WHERE a.patient_id = ? ORDER BY c.consultation_date DESC`,
+         LEFT JOIN \`USER\` ud ON a.doctor_id = ud.user_id
+         WHERE a.patient_id = ?
+         ORDER BY c.consultation_date DESC`,
+        [req.params.patientId]
+    );
+    const [prescriptions] = await mysqlPool.query(
+        `SELECT pr.prescription_id, pr.consultation_id, pr.prescribed_date, pr.status,
+                m.medicine_name, pi.dosage, pi.instructions, pi.duration_days, pi.quantity
+         FROM PRESCRIPTION pr
+         JOIN CONSULTATION c ON pr.consultation_id = c.consultation_id
+         JOIN APPOINTMENT a ON c.appointment_id = a.appointment_id
+         JOIN PRESCRIPTION_ITEM pi ON pr.prescription_id = pi.prescription_id
+         JOIN MEDICINE m ON pi.medicine_id = m.medicine_id
+         WHERE a.patient_id = ?
+         ORDER BY pr.prescribed_date DESC, pi.item_id ASC`,
         [req.params.patientId]
     );
     const lab_reports = await fetchPatientLabReports(req.params.patientId);
-    res.json({ records, consultations, lab_reports });
+    res.json({ patient: patient || null, records, consultations, prescriptions, lab_reports });
 });
 
 // Dedicated endpoint for doctor to view lab reports (for a specific patient or all patients requested by this doctor)
@@ -226,7 +257,33 @@ router.get('/patients/:patientId/lab-reports', async (req, res) => {
     res.json(reports);
 });
 
-// Consultation form submit (enforces appointment ownership).
+// Helper: validate prescription items before inserting
+function validatePrescriptionItems(items) {
+    if (!Array.isArray(items) || !items.length) {
+        return 'At least one prescription item is required';
+    }
+    for (let i = 0; i < items.length; i++) {
+        const it = items[i] || {};
+        const medId = Number(it.medicine_id);
+        const dur = Number(it.duration_days);
+        const qty = Number(it.quantity);
+        if (!Number.isInteger(medId) || medId <= 0) {
+            return `Prescription item #${i + 1}: valid medicine selection is required`;
+        }
+        if (!it.dosage || !String(it.dosage).trim()) {
+            return `Prescription item #${i + 1}: dosage is required`;
+        }
+        if (!Number.isInteger(dur) || dur <= 0) {
+            return `Prescription item #${i + 1}: duration_days must be a positive integer`;
+        }
+        if (!Number.isInteger(qty) || qty <= 0) {
+            return `Prescription item #${i + 1}: quantity must be a positive integer`;
+        }
+    }
+    return null;
+}
+
+// Consultation form submit (enforces appointment ownership, transactional, retry-safe, and supports atomic prescription_items & lab_requests).
 router.post('/consultations', async (req, res) => {
     const {
         appointment_id,
@@ -236,69 +293,172 @@ router.post('/consultations', async (req, res) => {
         recommend_admission,
         recommended_ward,
         admission_priority,
-        admission_reason
+        admission_reason,
+        prescription_items,
+        lab_requests
     } = req.body;
 
-    // Verify ownership: appointment must exist and belong to the logged-in doctor
-    const [[appt]] = await mysqlPool.query(
-        'SELECT appointment_id, patient_id, doctor_id, status FROM APPOINTMENT WHERE appointment_id = ?',
-        [appointment_id]
-    );
-    if (!appt) {
-        return res.status(404).json({ error: 'Appointment not found' });
+    if (!appointment_id) {
+        return res.status(400).json({ error: 'appointment_id is required' });
     }
-    if (Number(appt.doctor_id) !== Number(req.session.user.id)) {
-        return res.status(403).json({ error: 'Access denied: you can only record consultations for your own appointments' });
+    if (!symptoms || !String(symptoms).trim() || !diagnosis || !String(diagnosis).trim()) {
+        return res.status(400).json({ error: 'Symptoms and diagnosis are required' });
     }
 
-    const [result] = await mysqlPool.query(
-        'INSERT INTO CONSULTATION (appointment_id, symptoms, diagnosis, notes) VALUES (?, ?, ?, ?)',
-        [appointment_id, symptoms, diagnosis, notes]
-    );
-    await mysqlPool.query("UPDATE APPOINTMENT SET status='Completed' WHERE appointment_id=?", [appointment_id]);
+    if (Array.isArray(prescription_items) && prescription_items.length > 0) {
+        const rxErr = validatePrescriptionItems(prescription_items);
+        if (rxErr) {
+            return res.status(400).json({ error: rxErr });
+        }
+    }
 
-    // Sync consultation diagnosis automatically into patient's MEDICAL_RECORD
+    const conn = await mysqlPool.getConnection();
+    let consultationId = null;
+    let prescriptionId = null;
+    const createdLabRequestIds = [];
+    let nurseAlertPayload = null;
+
     try {
-        if (appt && appt.patient_id) {
-            const summary = diagnosis ? `${diagnosis}${symptoms ? ' (Symptoms: ' + symptoms + ')' : ''}` : (symptoms || 'Clinical consultation');
-            await mysqlPool.query(
-                'INSERT INTO MEDICAL_RECORD (patient_id, doctor_id, diagnosis_summary) VALUES (?, ?, ?)',
-                [appt.patient_id, req.session.user.id, summary.slice(0, 500)]
+        await conn.beginTransaction();
+
+        // Lock appointment row to prevent duplicate concurrent consultation submissions
+        const [[appt]] = await conn.query(
+            'SELECT appointment_id, patient_id, doctor_id, status FROM APPOINTMENT WHERE appointment_id = ? FOR UPDATE',
+            [appointment_id]
+        );
+        if (!appt) {
+            await conn.rollback();
+            return res.status(404).json({ error: 'Appointment not found' });
+        }
+        if (Number(appt.doctor_id) !== Number(req.session.user.id)) {
+            await conn.rollback();
+            return res.status(403).json({ error: 'Access denied: you can only record consultations for your own appointments' });
+        }
+
+        // Idempotent retry handling: check if consultation already exists for this appointment
+        const [[existingConsult]] = await conn.query(
+            'SELECT consultation_id FROM CONSULTATION WHERE appointment_id = ? FOR UPDATE',
+            [appointment_id]
+        );
+
+        if (existingConsult) {
+            consultationId = existingConsult.consultation_id;
+            await conn.query(
+                'UPDATE CONSULTATION SET symptoms = ?, diagnosis = ?, notes = ? WHERE consultation_id = ?',
+                [String(symptoms).trim(), String(diagnosis).trim(), notes ? String(notes).trim() : null, consultationId]
             );
+            await conn.query("UPDATE APPOINTMENT SET status = 'Completed' WHERE appointment_id = ?", [appointment_id]);
+        } else {
+            const [result] = await conn.query(
+                'INSERT INTO CONSULTATION (appointment_id, symptoms, diagnosis, notes) VALUES (?, ?, ?, ?)',
+                [appointment_id, String(symptoms).trim(), String(diagnosis).trim(), notes ? String(notes).trim() : null]
+            );
+            consultationId = result.insertId;
+            await conn.query("UPDATE APPOINTMENT SET status = 'Completed' WHERE appointment_id = ?", [appointment_id]);
 
-            // Inpatient Admission Recommendation (normalized: resolves recommended_ward_id from WARD)
-            if (recommend_admission) {
-                const targetWardName = recommended_ward || 'General Ward';
-                const prio = ['Standard', 'Urgent', 'Critical'].includes(admission_priority) ? admission_priority : 'Urgent';
-                const admReason = admission_reason || diagnosis || 'Doctor recommended inpatient hospitalization';
-
-                let [[wardRow]] = await mysqlPool.query('SELECT ward_id, ward_name FROM WARD WHERE ward_name = ? LIMIT 1', [targetWardName]);
-                if (!wardRow) {
-                    [[wardRow]] = await mysqlPool.query('SELECT ward_id, ward_name FROM WARD ORDER BY ward_id LIMIT 1');
-                }
-
-                const [admReq] = await mysqlPool.query(
-                    `INSERT INTO ADMISSION_REQUEST (patient_id, doctor_id, consultation_id, appointment_id, recommended_ward_id, priority, reason, status)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending')`,
-                    [appt.patient_id, req.session.user.id, result.insertId, appointment_id, wardRow.ward_id, prio, admReason]
+            // Sync consultation diagnosis automatically into patient's MEDICAL_RECORD
+            if (appt.patient_id) {
+                const summary = `${String(diagnosis).trim()} (Symptoms: ${String(symptoms).trim()})`;
+                await conn.query(
+                    'INSERT INTO MEDICAL_RECORD (patient_id, doctor_id, diagnosis_summary) VALUES (?, ?, ?)',
+                    [appt.patient_id, req.session.user.id, summary.slice(0, 500)]
                 );
-
-                // Broadcast notification to Nurses
-                try {
-                    const notifService = require('../services/notificationService');
-                    await notifService.broadcastToRole('Nurse', {
-                        title: 'Inpatient Admission Recommended',
-                        message: `Dr. ${req.session.user.name} recommended ${wardRow.ward_name} admission (${prio}) for patient #${appt.patient_id}. Bed assignment required.`,
-                        type: 'admission_request',
-                        metadata: { request_id: admReq.insertId, patient_id: appt.patient_id, ward: wardRow.ward_name, priority: prio }
-                    });
-                } catch (notifErr) {
-                    console.warn('Nurse notification warning:', notifErr.message);
-                }
             }
         }
-    } catch (mrErr) {
-        console.warn('Medical record / admission request warning:', mrErr.message);
+
+        // Inpatient Admission Recommendation (normalized: resolves recommended_ward_id from WARD)
+        if (recommend_admission && appt.patient_id) {
+            const [[existingAdmReq]] = await conn.query(
+                "SELECT request_id FROM ADMISSION_REQUEST WHERE consultation_id = ? AND status = 'Pending' LIMIT 1",
+                [consultationId]
+            );
+            if (!existingAdmReq) {
+                const targetWardName = recommended_ward || 'General Ward';
+                const prio = ['Standard', 'Urgent', 'Critical'].includes(admission_priority) ? admission_priority : 'Urgent';
+                const admReason = admission_reason || String(diagnosis).trim() || 'Doctor recommended inpatient hospitalization';
+
+                let [[wardRow]] = await conn.query('SELECT ward_id, ward_name FROM WARD WHERE ward_name = ? LIMIT 1', [targetWardName]);
+                if (!wardRow) {
+                    [[wardRow]] = await conn.query('SELECT ward_id, ward_name FROM WARD ORDER BY ward_id LIMIT 1');
+                }
+
+                const [admReq] = await conn.query(
+                    `INSERT INTO ADMISSION_REQUEST (patient_id, doctor_id, consultation_id, appointment_id, recommended_ward_id, priority, reason, status)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending')`,
+                    [appt.patient_id, req.session.user.id, consultationId, appointment_id, wardRow.ward_id, prio, admReason]
+                );
+                nurseAlertPayload = {
+                    title: 'Inpatient Admission Recommended',
+                    message: `Dr. ${req.session.user.name} recommended ${wardRow.ward_name} admission (${prio}) for patient #${appt.patient_id}. Bed assignment required.`,
+                    type: 'admission_request',
+                    metadata: { request_id: admReq.insertId, patient_id: appt.patient_id, ward: wardRow.ward_name, priority: prio }
+                };
+            }
+        }
+
+        // Optional atomic prescription creation in the same transaction
+        if (Array.isArray(prescription_items) && prescription_items.length > 0) {
+            for (const item of prescription_items) {
+                const [[med]] = await conn.query('SELECT medicine_id FROM MEDICINE WHERE medicine_id = ?', [item.medicine_id]);
+                if (!med) {
+                    await conn.rollback();
+                    return res.status(400).json({ error: `Invalid medicine_id: ${item.medicine_id}` });
+                }
+            }
+            const [rxRes] = await conn.query(
+                'INSERT INTO PRESCRIPTION (consultation_id, status) VALUES (?, ?)',
+                [consultationId, 'Pending']
+            );
+            prescriptionId = rxRes.insertId;
+            for (const item of prescription_items) {
+                await conn.query(
+                    'INSERT INTO PRESCRIPTION_ITEM (prescription_id, medicine_id, dosage, instructions, duration_days, quantity) VALUES (?, ?, ?, ?, ?, ?)',
+                    [
+                        prescriptionId,
+                        Number(item.medicine_id),
+                        String(item.dosage).trim(),
+                        item.instructions || item.timing || null,
+                        Number(item.duration_days),
+                        Number(item.quantity)
+                    ]
+                );
+            }
+        }
+
+        // Optional atomic lab requests in the same transaction
+        if (Array.isArray(lab_requests) && lab_requests.length > 0) {
+            for (const lr of lab_requests) {
+                if (!lr || !lr.test_id) continue;
+                const [[testRow]] = await conn.query('SELECT test_id FROM LAB_TEST WHERE test_id = ?', [lr.test_id]);
+                if (!testRow) {
+                    await conn.rollback();
+                    return res.status(400).json({ error: `Invalid lab test_id: ${lr.test_id}` });
+                }
+                const validPriority = ['Normal', 'Urgent', 'Emergency'].includes(lr.priority) ? lr.priority : 'Normal';
+                const [lrRes] = await conn.query(
+                    "INSERT INTO LAB_REQUEST (consultation_id, test_id, requested_by, priority, status) VALUES (?, ?, ?, ?, 'Pending')",
+                    [consultationId, Number(lr.test_id), req.session.user.id, validPriority]
+                );
+                createdLabRequestIds.push(lrRes.insertId);
+            }
+        }
+
+        await conn.commit();
+    } catch (txErr) {
+        await conn.rollback();
+        console.error('Error saving consultation transaction:', txErr);
+        return res.status(500).json({ error: txErr.sqlMessage || 'Failed to save consultation' });
+    } finally {
+        conn.release();
+    }
+
+    if (nurseAlertPayload) {
+        try {
+            const notifService = require('../services/notificationService');
+            await notifService.broadcastToRole('Nurse', nurseAlertPayload);
+        } catch (notifErr) {
+            console.warn('Nurse notification warning:', notifErr.message);
+        }
     }
 
     // MongoDB audit_log
@@ -309,11 +469,13 @@ router.post('/consultations', async (req, res) => {
             action: 'COMPLETE consultation',
             table_affected: 'CONSULTATION',
             details: {
-                consultation_id: result.insertId,
+                consultation_id: consultationId,
                 appointment_id: Number(appointment_id),
+                prescription_id: prescriptionId,
+                lab_request_ids: createdLabRequestIds,
                 doctor_id: req.session.user.id,
                 doctor_name: req.session.user.name,
-                diagnosis_summary: diagnosis ? diagnosis.slice(0, 200) : '',
+                diagnosis_summary: diagnosis ? String(diagnosis).slice(0, 200) : '',
                 recommended_admission: !!recommend_admission,
                 recommended_ward: recommend_admission ? (recommended_ward || 'General Ward') : null
             },
@@ -323,14 +485,22 @@ router.post('/consultations', async (req, res) => {
         console.warn('MongoDB audit_log write failed (non-fatal):', mongoErr.message);
     }
 
-    res.status(201).json({ consultation_id: result.insertId });
+    res.status(201).json({
+        consultation_id: consultationId,
+        prescription_id: prescriptionId,
+        lab_request_ids: createdLabRequestIds
+    });
 });
 
 // Prescription form submit -- header + items in one call (3NF: patient_id/doctor_id derived via consultation_id).
 router.post('/prescriptions', async (req, res) => {
     const { consultation_id, items } = req.body;
-    if (!consultation_id || !Array.isArray(items) || !items.length) {
-        return res.status(400).json({ error: 'consultation_id and at least one prescription item are required' });
+    if (!consultation_id) {
+        return res.status(400).json({ error: 'consultation_id is required' });
+    }
+    const rxErr = validatePrescriptionItems(items);
+    if (rxErr) {
+        return res.status(400).json({ error: rxErr });
     }
 
     const conn = await mysqlPool.getConnection();
@@ -354,6 +524,14 @@ router.post('/prescriptions', async (req, res) => {
             return res.status(403).json({ error: 'Access denied: you can only write prescriptions for your own consultations' });
         }
 
+        for (const item of items) {
+            const [[med]] = await conn.query('SELECT medicine_id FROM MEDICINE WHERE medicine_id = ?', [item.medicine_id]);
+            if (!med) {
+                await conn.rollback();
+                return res.status(400).json({ error: `Invalid medicine_id: ${item.medicine_id}` });
+            }
+        }
+
         const [result] = await conn.query(
             'INSERT INTO PRESCRIPTION (consultation_id, status) VALUES (?, ?)',
             [consultation_id, 'Pending']
@@ -362,7 +540,14 @@ router.post('/prescriptions', async (req, res) => {
         for (const item of items) {
             await conn.query(
                 'INSERT INTO PRESCRIPTION_ITEM (prescription_id, medicine_id, dosage, instructions, duration_days, quantity) VALUES (?, ?, ?, ?, ?, ?)',
-                [prescriptionId, item.medicine_id, item.dosage, item.instructions || item.timing || null, item.duration_days, item.quantity]
+                [
+                    prescriptionId,
+                    Number(item.medicine_id),
+                    String(item.dosage).trim(),
+                    item.instructions || item.timing || null,
+                    Number(item.duration_days),
+                    Number(item.quantity)
+                ]
             );
         }
         await conn.commit();

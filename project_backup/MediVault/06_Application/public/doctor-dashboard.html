@@ -9,8 +9,6 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
 <link href="/assets/css/medivault-restyle.css" rel="stylesheet">
 <link rel="stylesheet" href="/assets/css/clinical-record.css">
-<script src="/assets/js/theme-init.js"></script>
-<script src="/runtime-config.js"></script>
 <style>
 .schedule-stats {
     display: grid;
@@ -141,14 +139,16 @@
     let schedule = [];
     let selectedAppt = null;
     let rxItems = [];
+    let labOrderItems = [];
     let medicines = [];
+    let labTests = [];
     let consultModalInst;
 
     (async function init() {
         const ctx = await MV.shell.mount({
             roles: ['Doctor'],
             title: 'My Schedule',
-            subtitle: 'Today'
+            subtitle: 'Today & Upcoming'
         });
 
         ctx.content.innerHTML =
@@ -164,13 +164,14 @@
 
         loadSchedule();
         loadMedicines();
+        loadLabTests();
     })();
 
     async function loadSchedule() {
         const stats = document.getElementById('scheduleStats');
         const timeline = document.getElementById('scheduleTimeline');
 
-        stats.innerHTML = Array(3).fill('<div class="mv-stat"><div class="mv-skeleton" style="width:40px;height:28px;margin:0 auto 8px"></div><div class="mv-skeleton" style="width:60px;height:12px;margin:0 auto"></div></div>').join('');
+        stats.innerHTML = Array(4).fill('<div class="mv-stat"><div class="mv-skeleton" style="width:40px;height:28px;margin:0 auto 8px"></div><div class="mv-skeleton" style="width:60px;height:12px;margin:0 auto"></div></div>').join('');
         timeline.innerHTML = Array(3).fill('<div class="timeline-item"><div class="mv-skeleton" style="width:50px;height:40px"></div><div style="flex:1"><div class="mv-skeleton" style="width:120px;height:14px;margin-bottom:8px"></div><div class="mv-skeleton" style="width:80px;height:12px"></div></div></div>').join('');
 
         try {
@@ -178,12 +179,14 @@
 
             const today = MV.fmt.isoDate();
             const todayCount = schedule.filter(function (a) { return a.appointment_date && a.appointment_date.slice(0, 10) === today; }).length;
+            const upcomingCount = schedule.filter(function (a) { return a.appointment_date && a.appointment_date.slice(0, 10) > today && (a.status === 'Scheduled' || a.status === 'Confirmed' || a.status === 'Checked In'); }).length;
             const pendingCount = schedule.filter(function (a) { return a.status === 'Scheduled'; }).length;
             const confirmedCount = schedule.filter(function (a) { return a.status === 'Confirmed'; }).length;
             const completedCount = schedule.filter(function (a) { return a.status === 'Completed'; }).length;
 
             stats.innerHTML =
                 '<div class="mv-stat"><div class="mv-stat-value">' + todayCount + '</div><div class="mv-stat-label">Today</div></div>' +
+                '<div class="mv-stat"><div class="mv-stat-value">' + upcomingCount + '</div><div class="mv-stat-label">Upcoming</div></div>' +
                 '<div class="mv-stat"><div class="mv-stat-value">' + pendingCount + '</div><div class="mv-stat-label">Pending Approval</div></div>' +
                 '<div class="mv-stat"><div class="mv-stat-value">' + confirmedCount + '</div><div class="mv-stat-label">Confirmed</div></div>' +
                 '<div class="mv-stat"><div class="mv-stat-value">' + completedCount + '</div><div class="mv-stat-label">Completed</div></div>';
@@ -234,7 +237,10 @@
                             '</button>';
                     } else if (appt.status === 'Completed') {
                         statusBadge = '<span class="mv-badge is-success"><i class="fas fa-check-double me-1"></i>Completed</span>';
-                        actionButtons = '<span style="font-size:12px;color:var(--mv-text-muted);font-weight:500;"><i class="fas fa-check-circle text-success me-1"></i>Finished</span>';
+                        actionButtons =
+                            '<button type="button" class="mv-btn mv-btn-outline mv-btn-sm" onclick="openConsultation(' + appt.appointment_id + ')">' +
+                              '<i class="fas fa-file-medical me-1"></i>View Record' +
+                            '</button>';
                     } else {
                         statusBadge = '<span class="mv-badge is-danger"><i class="fas fa-ban me-1"></i>Cancelled</span>';
                         actionButtons = '<span style="font-size:12px;color:var(--mv-text-muted);">Cancelled</span>';
@@ -287,11 +293,20 @@
         }
     }
 
+    async function loadLabTests() {
+        try {
+            labTests = await MV.api.get('/api/doctor/lab-tests');
+        } catch (err) {
+            labTests = [];
+        }
+    }
+
     window.openConsultation = async function (appointmentId) {
         selectedAppt = schedule.find(function (a) { return a.appointment_id === appointmentId; });
         if (!selectedAppt) return;
 
-        rxItems = [{ medicine_id: null, medicine_name: '', dosage: '', duration_days: '', quantity: '' }];
+        rxItems = [{ medicine_id: null, medicine_name: '', dosage: '', instructions: 'Morning 1, Evening 1', duration_days: '', quantity: '' }];
+        labOrderItems = [];
 
         const body = document.getElementById('consultBody');
         body.innerHTML = '<div class="text-center py-4"><div class="spinner-border text-primary"></div></div>';
@@ -299,34 +314,76 @@
 
         try {
             const history = await MV.api.get('/api/doctor/patients/' + selectedAppt.patient_id + '/history');
+            const pt = history.patient || {};
+            const records = history.records || [];
+            const consultations = history.consultations || [];
+            const prescriptions = history.prescriptions || [];
             const labReports = history.lab_reports || [];
 
+            const existingConsult = consultations.find(function (c) { return c.appointment_id === selectedAppt.appointment_id; }) || null;
+
             body.innerHTML =
-                '<div style="margin-bottom:24px">' +
-                  '<h6 style="font-size:16px;font-weight:600;margin:0 0 8px">Patient: ' + MV.esc(selectedAppt.patient_name) + '</h6>' +
-                  '<p style="font-size:12px;color:var(--mv-text-muted);margin:0">Appointment: ' + MV.fmt.time12(selectedAppt.appointment_time) + '</p>' +
+                '<div style="margin-bottom:20px;padding:14px 16px;background:var(--mv-surface-1);border:1px solid var(--mv-border);border-radius:8px">' +
+                  '<div class="d-flex justify-content-between align-items-start flex-wrap gap-2">' +
+                    '<div>' +
+                      '<h6 style="font-size:16px;font-weight:600;margin:0 0 4px">Patient: ' + MV.esc(selectedAppt.patient_name) + ' <small class="text-muted">(#' + selectedAppt.patient_id + ')</small></h6>' +
+                      '<p style="font-size:12px;color:var(--mv-text-muted);margin:0">' +
+                        'Appointment: ' + MV.fmt.dateIndian(selectedAppt.appointment_date) + ' at ' + MV.fmt.time12(selectedAppt.appointment_time) +
+                        (pt.gender ? ' &bull; Gender: ' + MV.esc(pt.gender) : '') +
+                        (pt.age != null ? ' &bull; Age: ' + MV.esc(pt.age) + 'y' : '') +
+                        (pt.blood_group ? ' &bull; Blood Group: <strong>' + MV.esc(pt.blood_group) + '</strong>' : '') +
+                      '</p>' +
+                    '</div>' +
+                    '<div>' +
+                      '<span class="mv-badge ' + (pt.allergies && pt.allergies !== 'None documented' ? 'is-danger' : 'is-neutral') + '">' +
+                        '<i class="fas fa-allergies me-1"></i>Allergies: ' + MV.esc(pt.allergies || 'None documented') +
+                      '</span>' +
+                    '</div>' +
+                  '</div>' +
                 '</div>' +
 
-                '<section class="rx-history"><h6>Clinical history</h6>' +
-                  (history.records.length ? history.records.map(r=>'<p>'+MV.fmt.date(r.created_at)+' · '+MV.esc(r.diagnosis_summary)+'</p>').join('') : '<p class="text-muted">No earlier medical records.</p>') +
-                '</section>' +
-                '<section class="rx-history mt-2"><h6>Diagnostic Lab Reports</h6>' +
-                  (labReports.length
-                    ? labReports.map(lr => '<p><strong>' + MV.esc(lr.test_name) + '</strong> (' + MV.fmt.date(lr.report_date) + '): ' + MV.esc(lr.result_summary) + '</p>').join('')
-                    : '<p class="text-muted">No lab reports on file.</p>') +
-                '</section>' +
+                '<div class="row g-3 mb-3">' +
+                  '<div class="col-md-6">' +
+                    '<section class="rx-history"><h6>Clinical History &amp; Prior Consultations</h6>' +
+                      (consultations.length
+                        ? consultations.slice(0, 5).map(function (c) {
+                            return '<p class="mb-1"><strong>' + MV.fmt.date(c.consultation_date) + '</strong> · ' + MV.esc(c.diagnosis) +
+                                (c.symptoms ? ' <small class="text-muted">(' + MV.esc(c.symptoms) + ')</small>' : '') + '</p>';
+                        }).join('')
+                        : (records.length
+                            ? records.map(function (r) { return '<p class="mb-1">' + MV.fmt.date(r.created_at) + ' · ' + MV.esc(r.diagnosis_summary) + '</p>'; }).join('')
+                            : '<p class="text-muted mb-0">No earlier medical records.</p>')) +
+                    '</section>' +
+                  '</div>' +
+                  '<div class="col-md-6">' +
+                    '<section class="rx-history"><h6>Diagnostic Lab Reports &amp; Prior Prescriptions</h6>' +
+                      (labReports.length
+                        ? labReports.slice(0, 4).map(function (lr) {
+                            return '<p class="mb-1"><strong>' + MV.esc(lr.test_name) + '</strong> (' + MV.fmt.date(lr.report_date) + '): ' + MV.esc(lr.result_summary) + '</p>';
+                        }).join('')
+                        : '<p class="text-muted mb-1">No lab reports on file.</p>') +
+                      (prescriptions.length
+                        ? '<div class="mt-2 pt-2 border-top"><small class="text-muted fw-semibold d-block mb-1">Recent Prescriptions:</small>' +
+                          prescriptions.slice(0, 4).map(function (pr) {
+                              return '<small class="d-block text-muted">' + MV.fmt.date(pr.prescribed_date) + ' · ' + MV.esc(pr.medicine_name) + ' (' + MV.esc(pr.dosage) + ', ' + pr.quantity + ' units, ' + MV.esc(pr.status) + ')</small>';
+                          }).join('') + '</div>'
+                        : '') +
+                    '</section>' +
+                  '</div>' +
+                '</div>' +
+
                 '<form id="consultForm">' +
                   '<div class="mb-3">' +
-                    '<label class="form-label">Symptoms</label>' +
-                    '<textarea class="form-control" name="symptoms" rows="2" required></textarea>' +
+                    '<label class="form-label">Symptoms <span class="text-danger">*</span></label>' +
+                    '<textarea class="form-control" name="symptoms" rows="2" required placeholder="Patient chief complaints and symptoms...">' + MV.esc(existingConsult ? existingConsult.symptoms : '') + '</textarea>' +
                   '</div>' +
                   '<div class="mb-3">' +
-                    '<label class="form-label">Diagnosis</label>' +
-                    '<textarea class="form-control" name="diagnosis" rows="2" required></textarea>' +
+                    '<label class="form-label">Diagnosis <span class="text-danger">*</span></label>' +
+                    '<textarea class="form-control" name="diagnosis" rows="2" required placeholder="Clinical diagnosis...">' + MV.esc(existingConsult ? existingConsult.diagnosis : '') + '</textarea>' +
                   '</div>' +
                   '<div class="mb-3">' +
-                    '<label class="form-label">Notes</label>' +
-                    '<textarea class="form-control" name="notes" rows="2"></textarea>' +
+                    '<label class="form-label">Clinical Observations &amp; Notes</label>' +
+                    '<textarea class="form-control" name="notes" rows="2" placeholder="Physical exam findings, observations, follow-up instructions...">' + MV.esc(existingConsult ? (existingConsult.notes || '') : '') + '</textarea>' +
                   '</div>' +
                 '</form>' +
 
@@ -336,6 +393,16 @@
                   '<button type="button" class="mv-btn mv-btn-outline mv-btn-sm rx-add-btn" onclick="addRxItem()">' +
                     '<i class="fas fa-plus"></i> Add Medicine' +
                   '</button>' +
+                '</div>' +
+
+                '<div class="rx-builder mt-3">' +
+                  '<div class="d-flex justify-content-between align-items-center mb-2">' +
+                    '<h6 class="m-0">Diagnostic Lab Orders (Optional)</h6>' +
+                    '<button type="button" class="mv-btn mv-btn-outline mv-btn-sm" onclick="addLabOrderItem()">' +
+                      '<i class="fas fa-flask"></i> Add Lab Test' +
+                    '</button>' +
+                  '</div>' +
+                  '<div id="labOrderContainer"></div>' +
                 '</div>' +
 
                 '<div class="mt-4 p-3" style="background:var(--mv-surface-1);border:1px solid var(--mv-border);border-radius:6px">' +
@@ -379,6 +446,7 @@
                 '</div>';
 
             renderRxItems();
+            renderLabOrderItems();
 
         } catch (err) {
             body.innerHTML = '<p class="text-danger">Failed to load patient data</p>';
@@ -411,26 +479,31 @@
                         '<td style="padding:4px 8px">' +
                           '<input type="text" class="form-control form-control-sm" list="medicineList" placeholder="Search medicine..." ' +
                             'value="' + MV.esc(item.medicine_name) + '" ' +
+                            'oninput="updateRxMedicine(' + idx + ', this.value)" ' +
                             'onchange="updateRxMedicine(' + idx + ', this.value)">' +
                         '</td>' +
                         '<td style="padding:4px 8px">' +
                           '<input type="text" class="form-control form-control-sm" placeholder="e.g. 500mg" ' +
                             'value="' + MV.esc(item.dosage) + '" ' +
+                            'oninput="updateRxField(' + idx + ', \'dosage\', this.value)" ' +
                             'onchange="updateRxField(' + idx + ', \'dosage\', this.value)">' +
                         '</td>' +
                         '<td style="padding:4px 8px">' +
                           '<input type="text" class="form-control form-control-sm" list="timingList" placeholder="e.g. Morning 1, After lunch..." ' +
                             'value="' + MV.esc(item.instructions || '') + '" ' +
+                            'oninput="updateRxField(' + idx + ', \'instructions\', this.value)" ' +
                             'onchange="updateRxField(' + idx + ', \'instructions\', this.value)">' +
                         '</td>' +
                         '<td style="padding:4px 8px">' +
-                          '<input type="number" class="form-control form-control-sm" placeholder="7" ' +
+                          '<input type="number" min="1" class="form-control form-control-sm" placeholder="7" ' +
                             'value="' + (item.duration_days || '') + '" ' +
+                            'oninput="updateRxField(' + idx + ', \'duration_days\', this.value)" ' +
                             'onchange="updateRxField(' + idx + ', \'duration_days\', this.value)">' +
                         '</td>' +
                         '<td style="padding:4px 8px">' +
-                          '<input type="number" class="form-control form-control-sm" placeholder="14" ' +
+                          '<input type="number" min="1" class="form-control form-control-sm" placeholder="14" ' +
                             'value="' + (item.quantity || '') + '" ' +
+                            'oninput="updateRxField(' + idx + ', \'quantity\', this.value)" ' +
                             'onchange="updateRxField(' + idx + ', \'quantity\', this.value)">' +
                         '</td>' +
                         '<td style="padding:4px 8px;text-align:center">' +
@@ -460,6 +533,54 @@
             '</datalist>';
     }
 
+    function renderLabOrderItems() {
+        const container = document.getElementById('labOrderContainer');
+        if (!container) return;
+        if (!labOrderItems.length) {
+            container.innerHTML = '<p class="text-muted small mb-0">No diagnostic tests selected for this visit.</p>';
+            return;
+        }
+        container.innerHTML = labOrderItems.map(function (item, idx) {
+            return '<div class="row g-2 align-items-center mb-2">' +
+                '<div class="col-md-7">' +
+                  '<select class="form-select form-select-sm" onchange="updateLabOrderField(' + idx + ', \'test_id\', this.value)">' +
+                    '<option value="">Select diagnostic test...</option>' +
+                    labTests.map(function (lt) {
+                        const sel = Number(item.test_id) === Number(lt.test_id) ? 'selected' : '';
+                        return '<option value="' + lt.test_id + '" ' + sel + '>' + MV.esc(lt.test_name) + '</option>';
+                    }).join('') +
+                  '</select>' +
+                '</div>' +
+                '<div class="col-md-4">' +
+                  '<select class="form-select form-select-sm" onchange="updateLabOrderField(' + idx + ', \'priority\', this.value)">' +
+                    '<option value="Normal" ' + (item.priority === 'Normal' ? 'selected' : '') + '>Normal Priority</option>' +
+                    '<option value="Urgent" ' + (item.priority === 'Urgent' ? 'selected' : '') + '>Urgent Priority</option>' +
+                    '<option value="Emergency" ' + (item.priority === 'Emergency' ? 'selected' : '') + '>Emergency Priority</option>' +
+                  '</select>' +
+                '</div>' +
+                '<div class="col-md-1 text-end">' +
+                  '<button type="button" class="mv-btn mv-btn-ghost mv-btn-icon mv-btn-sm text-danger" onclick="removeLabOrderItem(' + idx + ')">' +
+                    '<i class="fas fa-trash-alt"></i>' +
+                  '</button>' +
+                '</div>' +
+              '</div>';
+        }).join('');
+    }
+
+    window.addLabOrderItem = function () {
+        labOrderItems.push({ test_id: '', priority: 'Normal' });
+        renderLabOrderItems();
+    };
+
+    window.removeLabOrderItem = function (idx) {
+        labOrderItems.splice(idx, 1);
+        renderLabOrderItems();
+    };
+
+    window.updateLabOrderField = function (idx, field, value) {
+        if (labOrderItems[idx]) labOrderItems[idx][field] = value;
+    };
+
     window.addRxItem = function () {
         rxItems.push({ medicine_id: null, medicine_name: '', dosage: '', instructions: 'Morning 1, Evening 1', duration_days: '', quantity: '' });
         renderRxItems();
@@ -471,7 +592,8 @@
     };
 
     window.updateRxMedicine = function (idx, name) {
-        const med = medicines.find(function (m) { return m.medicine_name === name; });
+        const clean = String(name || '').trim().toLowerCase();
+        const med = medicines.find(function (m) { return String(m.medicine_name).toLowerCase() === clean; });
         rxItems[idx].medicine_name = name;
         rxItems[idx].medicine_id = med ? med.medicine_id : null;
     };
@@ -487,6 +609,55 @@
             return;
         }
 
+        // Validate prescription rows: if any field in a row is filled, validate the entire row
+        const populatedRxRows = rxItems.filter(function (item) {
+            return Boolean(
+                (item.medicine_name && String(item.medicine_name).trim()) ||
+                (item.dosage && String(item.dosage).trim()) ||
+                item.duration_days ||
+                item.quantity
+            );
+        });
+
+        for (let i = 0; i < populatedRxRows.length; i++) {
+            const r = populatedRxRows[i];
+            if (!r.medicine_id) {
+                MV.toast.error('Invalid Medicine', 'Row #' + (i + 1) + ': Please select a valid medicine from the database list.');
+                return;
+            }
+            if (!r.dosage || !String(r.dosage).trim()) {
+                MV.toast.error('Missing Dosage', 'Row #' + (i + 1) + ': Please enter a dosage (e.g. 500mg).');
+                return;
+            }
+            if (!r.duration_days || Number(r.duration_days) <= 0) {
+                MV.toast.error('Invalid Duration', 'Row #' + (i + 1) + ': Duration (days) must be greater than 0.');
+                return;
+            }
+            if (!r.quantity || Number(r.quantity) <= 0) {
+                MV.toast.error('Invalid Quantity', 'Row #' + (i + 1) + ': Quantity must be greater than 0.');
+                return;
+            }
+        }
+
+        const validItems = populatedRxRows.map(function (item) {
+            return {
+                medicine_id: Number(item.medicine_id),
+                dosage: String(item.dosage).trim(),
+                instructions: item.instructions ? String(item.instructions).trim() : '',
+                duration_days: Number(item.duration_days),
+                quantity: Number(item.quantity)
+            };
+        });
+
+        const validLabOrders = labOrderItems.filter(function (l) {
+            return l.test_id && Number(l.test_id) > 0;
+        }).map(function (l) {
+            return {
+                test_id: Number(l.test_id),
+                priority: l.priority || 'Normal'
+            };
+        });
+
         const formData = Object.fromEntries(new FormData(form));
         const btn = document.getElementById('saveConsultation');
         const restore = MV.pending(btn, 'Saving...');
@@ -497,8 +668,8 @@
         const admissionReason = document.getElementById('admissionReason')?.value || '';
 
         try {
-            // Save consultation + admission recommendation
-            const consultRes = await MV.api.post('/api/doctor/consultations', {
+            // Coordinated atomic save: consultation + admission recommendation + prescription + lab orders in one transaction
+            await MV.api.post('/api/doctor/consultations', {
                 appointment_id: selectedAppt.appointment_id,
                 symptoms: formData.symptoms,
                 diagnosis: formData.diagnosis,
@@ -506,29 +677,10 @@
                 recommend_admission: recommendAdmission,
                 recommended_ward: recommendedWard,
                 admission_priority: admissionPriority,
-                admission_reason: admissionReason
+                admission_reason: admissionReason,
+                prescription_items: validItems,
+                lab_requests: validLabOrders
             });
-
-            // Save prescription if any items filled
-            const validItems = rxItems.filter(function (item) {
-                return item.medicine_id && item.dosage && item.duration_days && item.quantity;
-            }).map(function (item) {
-                return {
-                    medicine_id: item.medicine_id,
-                    dosage: item.dosage,
-                    instructions: item.instructions || '',
-                    duration_days: item.duration_days,
-                    quantity: item.quantity
-                };
-            });
-
-            if (validItems.length > 0) {
-                await MV.api.post('/api/doctor/prescriptions', {
-                    consultation_id: consultRes.consultation_id,
-                    patient_id: selectedAppt.patient_id,
-                    items: validItems
-                });
-            }
 
             const successMsg = recommendAdmission 
                 ? 'Consultation saved & admission request sent to Nurse Station' 
