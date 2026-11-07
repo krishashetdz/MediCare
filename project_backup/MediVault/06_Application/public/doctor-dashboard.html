@@ -223,8 +223,8 @@
                             '<button type="button" class="mv-btn mv-btn-ghost mv-btn-sm text-danger" title="Decline appointment" onclick="setApptStatus(' + appt.appointment_id + ', \'Cancelled\')">' +
                               '<i class="fas fa-times"></i>' +
                             '</button>';
-                    } else if (appt.status === 'Confirmed') {
-                        statusBadge = '<span class="mv-badge is-info"><i class="fas fa-check-circle me-1"></i>Confirmed</span>';
+                    } else if (appt.status === 'Confirmed' || appt.status === 'Checked In') {
+                        statusBadge = '<span class="mv-badge is-info"><i class="fas fa-check-circle me-1"></i>' + MV.esc(appt.status) + '</span>';
                         actionButtons =
                             '<button type="button" class="mv-btn mv-btn-primary mv-btn-sm" onclick="openConsultation(' + appt.appointment_id + ')">' +
                               '<i class="fas fa-stethoscope me-1"></i>Start Consultation' +
@@ -299,6 +299,7 @@
 
         try {
             const history = await MV.api.get('/api/doctor/patients/' + selectedAppt.patient_id + '/history');
+            const labReports = history.lab_reports || [];
 
             body.innerHTML =
                 '<div style="margin-bottom:24px">' +
@@ -308,6 +309,11 @@
 
                 '<section class="rx-history"><h6>Clinical history</h6>' +
                   (history.records.length ? history.records.map(r=>'<p>'+MV.fmt.date(r.created_at)+' · '+MV.esc(r.diagnosis_summary)+'</p>').join('') : '<p class="text-muted">No earlier medical records.</p>') +
+                '</section>' +
+                '<section class="rx-history mt-2"><h6>Diagnostic Lab Reports</h6>' +
+                  (labReports.length
+                    ? labReports.map(lr => '<p><strong>' + MV.esc(lr.test_name) + '</strong> (' + MV.fmt.date(lr.report_date) + '): ' + MV.esc(lr.result_summary) + '</p>').join('')
+                    : '<p class="text-muted">No lab reports on file.</p>') +
                 '</section>' +
                 '<form id="consultForm">' +
                   '<div class="mb-3">' +

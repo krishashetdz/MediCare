@@ -150,7 +150,7 @@
 @media print {
     @page { margin: 14mm; }
     body { background: white; }
-    .mv-sidebar, .mv-topbar, .mv-footer, .mv-btn { display: none !important; }
+    .mv-sidebar, .mv-topbar, .mv-footer, .mv-btn, .no-print { display: none !important; }
     .mv-main { margin-left: 0 !important; }
     .mv-page { padding: 0 !important; }
     .invoice-container {
@@ -170,6 +170,49 @@
 
 <div class="mv-layout" id="mvShell"></div>
 
+<!-- Record Payment Modal -->
+<div class="modal fade" id="paymentModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="fas fa-receipt text-primary me-2"></i>Record Payment</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="paymentForm">
+                    <div class="mb-3">
+                        <label class="form-label">Remaining Balance Due (₹)</label>
+                        <input type="text" class="form-control" id="payBalanceDisplay" readonly>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Payment Amount (₹) <span class="text-danger">*</span></label>
+                        <input type="number" step="0.01" min="0.01" class="form-control" name="amount_paid" id="payAmountInput" required>
+                        <small class="text-muted">Enter a partial amount for Partial status, or the full balance for Paid status.</small>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Payment Method</label>
+                        <select class="form-select" name="payment_method">
+                            <option value="Cash">Cash</option>
+                            <option value="UPI">UPI</option>
+                            <option value="Card">Card</option>
+                            <option value="Bank Transfer">Bank Transfer</option>
+                            <option value="Insurance">Insurance</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Transaction / Reference Number</label>
+                        <input type="text" class="form-control" name="reference_no" placeholder="e.g. UPI-884120 or POS-1102">
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="mv-btn mv-btn-outline" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="mv-btn mv-btn-primary" id="submitPaymentBtn">Record Payment &amp; Issue Receipt</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
 <script src="/assets/js/mv-core.js"></script>
 <script src="/assets/js/mv-shell.js"></script>
@@ -177,17 +220,22 @@
 (function () {
     'use strict';
 
-    /* Billing - HERO is printable invoice with letterhead */
+    /* Billing - HERO is printable invoice with letterhead + distinct payment receipts */
 
     const params = new URLSearchParams(location.search);
     const billId = params.get('id');
+    let currentUser = null;
+    let currentBill = null;
+    let paymentModalInst = null;
 
     (async function init() {
         const ctx = await MV.shell.mount({
             roles: ['Admin', 'Receptionist', 'Doctor', 'Patient'],
             title: 'Billing',
-            subtitle: 'Invoice'
+            subtitle: 'Invoice & Payment Receipts'
         });
+        currentUser = ctx.user;
+        paymentModalInst = new bootstrap.Modal(document.getElementById('paymentModal'));
 
         if (!billId) {
             ctx.content.innerHTML =
@@ -205,8 +253,15 @@
             return;
         }
 
+        const canRecordPayment = currentUser.role === 'Admin' || currentUser.role === 'Receptionist';
+
         ctx.actions.innerHTML =
-            '<button type="button" class="mv-btn mv-btn-primary" id="printBtn">' +
+            (canRecordPayment
+                ? '<button type="button" class="mv-btn mv-btn-primary d-none" id="recordPaymentBtn">' +
+                    '<i class="fas fa-credit-card"></i><span>Record Payment</span>' +
+                  '</button>'
+                : '') +
+            '<button type="button" class="mv-btn mv-btn-outline" id="printBtn">' +
               '<i class="fas fa-print"></i><span>Print Invoice</span>' +
             '</button>' +
             '<button type="button" class="mv-btn mv-btn-outline" id="backBtn">' +
@@ -215,6 +270,37 @@
 
         document.getElementById('printBtn').addEventListener('click', function () { window.print(); });
         document.getElementById('backBtn').addEventListener('click', function () { history.back(); });
+
+        const recBtn = document.getElementById('recordPaymentBtn');
+        if (recBtn) {
+            recBtn.addEventListener('click', function () {
+                if (!currentBill) return;
+                const bal = Number(currentBill.balance_due !== undefined ? currentBill.balance_due : currentBill.total_amount);
+                document.getElementById('payBalanceDisplay').value = '₹' + bal.toFixed(2);
+                const amtInput = document.getElementById('payAmountInput');
+                amtInput.max = bal.toFixed(2);
+                amtInput.value = bal.toFixed(2);
+                paymentModalInst.show();
+            });
+        }
+
+        document.getElementById('submitPaymentBtn').addEventListener('click', async function () {
+            const form = document.getElementById('paymentForm');
+            if (!form.checkValidity()) return form.reportValidity();
+            const data = Object.fromEntries(new FormData(form));
+            const restore = MV.pending(this, 'Recording...');
+            try {
+                const res = await MV.api.post('/api/billing/' + billId + '/payments', data);
+                MV.toast.success('Receipt ' + res.receipt.receipt_number + ' issued', res.message);
+                paymentModalInst.hide();
+                form.reset();
+                loadBill(ctx.content);
+            } catch (err) {
+                MV.toast.error('Payment failed', err.message);
+            } finally {
+                restore();
+            }
+        });
 
         ctx.content.innerHTML = '<div class="invoice-container"><div class="text-center py-5">' +
             '<div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div>' +
@@ -237,17 +323,16 @@
                 return;
             }
             slot.innerHTML = MV.table({
-                columns: ['Bill #', 'Patient', 'Date', 'Amount', 'Status', 'Action'],
+                columns: ['Bill #', 'Patient', 'Date', 'Total', 'Paid', 'Balance', 'Status', 'Action'],
                 rows: bills.map(function (b) {
-                    const statusBadge = b.payment_status === 'Paid'
-                        ? '<span class="mv-badge mv-badge-success"><i class="fa-solid fa-check me-1"></i>Paid</span>'
-                        : '<span class="mv-badge mv-badge-warning"><i class="fa-solid fa-clock me-1"></i>Pending</span>';
                     return [
                         '#' + b.bill_id,
                         MV.esc(b.patient_name || ('Patient #' + b.patient_id)),
                         MV.fmt.dateIndian(b.bill_date),
-                        '<strong>₹' + Number(b.total_amount).toFixed(2) + '</strong>',
-                        statusBadge,
+                        '<strong>₹' + Number(b.total_amount || 0).toFixed(2) + '</strong>',
+                        '₹' + Number(b.paid_amount || 0).toFixed(2),
+                        '₹' + Number(b.balance_due !== undefined ? b.balance_due : b.total_amount).toFixed(2),
+                        MV.badge(b.payment_status),
                         '<a href="/billing.html?id=' + b.bill_id + '" class="mv-btn mv-btn-sm mv-btn-outline"><i class="fa-solid fa-eye me-1"></i>View Invoice</a>'
                     ];
                 })
@@ -261,9 +346,15 @@
         try {
             const bill = await MV.api.get('/api/billing/' + billId);
             const items = await MV.api.get('/api/billing/' + billId + '/items');
+            const payments = bill.payments || (await MV.api.get('/api/billing/' + billId + '/payments').catch(() => []));
+            currentBill = bill;
 
             const isPaid = bill.payment_status === 'Paid';
             const billDate = MV.fmt.dateIndian(bill.bill_date);
+            const recBtn = document.getElementById('recordPaymentBtn');
+            if (recBtn) {
+                recBtn.classList.toggle('d-none', isPaid || Number(bill.balance_due) <= 0);
+            }
 
             let html = '<div class="invoice-container">' +
                 '<div class="invoice-letterhead">' +
@@ -287,7 +378,7 @@
                   '</div>' +
                   '<div class="invoice-meta-item">' +
                     '<strong>Payment Status</strong>' +
-                    '<p>' + bill.payment_status + '</p>' +
+                    '<p>' + MV.badge(bill.payment_status) + '</p>' +
                   '</div>' +
                 '</div>';
 
@@ -306,7 +397,7 @@
             items.forEach(function (it) {
                 html += '<tr>' +
                     '<td>' + MV.esc(it.description || '--') + '</td>' +
-                    '<td>' + it.item_type + '</td>' +
+                    '<td>' + MV.esc(it.item_type) + '</td>' +
                     '<td class="amount">₹' + MV.fmt.numberIndian(it.amount) + '</td>' +
                   '</tr>';
             });
@@ -314,11 +405,39 @@
             html += '</tbody></table>';
 
             html += '<div class="invoice-total">' +
-                '<div class="invoice-total-line grand">' +
-                  '<span>Total Amount</span>' +
+                '<div class="invoice-total-line">' +
+                  '<span>Invoice Total</span>' +
                   '<span>₹' + MV.fmt.numberIndian(bill.total_amount) + '</span>' +
                 '</div>' +
+                '<div class="invoice-total-line">' +
+                  '<span>Amount Paid</span>' +
+                  '<span class="text-success">₹' + MV.fmt.numberIndian(bill.paid_amount || 0) + '</span>' +
+                '</div>' +
+                '<div class="invoice-total-line grand">' +
+                  '<span>Balance Due</span>' +
+                  '<span>₹' + MV.fmt.numberIndian(bill.balance_due !== undefined ? bill.balance_due : bill.total_amount) + '</span>' +
+                '</div>' +
               '</div>';
+
+            if (payments && payments.length) {
+                html += '<div style="margin-bottom:28px">' +
+                    '<h6 style="font-size:13px;font-weight:700;text-transform:uppercase;color:var(--mv-text-muted);margin-bottom:10px">Payment Receipts</h6>' +
+                    '<table class="items-table" style="margin-bottom:0">' +
+                      '<thead><tr><th>Receipt #</th><th>Date</th><th>Method</th><th>Ref</th><th class="amount">Paid</th></tr></thead>' +
+                      '<tbody>' +
+                      payments.map(function (pm) {
+                          return '<tr>' +
+                              '<td><strong>' + MV.esc(pm.receipt_number) + '</strong></td>' +
+                              '<td>' + MV.fmt.dateIndian(pm.paid_at) + '</td>' +
+                              '<td>' + MV.esc(pm.payment_method) + '</td>' +
+                              '<td>' + MV.esc(pm.reference_no || '--') + '</td>' +
+                              '<td class="amount">₹' + MV.fmt.numberIndian(pm.amount_paid) + '</td>' +
+                            '</tr>';
+                      }).join('') +
+                      '</tbody>' +
+                    '</table>' +
+                  '</div>';
+            }
 
             html += '<div class="invoice-footer">' +
                 '<p>This is a computer-generated invoice. No signature required.</p>' +

@@ -1,10 +1,11 @@
 const express = require('express');
+const bcrypt = require('bcryptjs');
 const router = express.Router();
 const { mysqlPool, getMongo } = require('../config/db');
-const { requireRole, requireAuth } = require('../middleware/auth');
+const { requireRole } = require('../middleware/auth');
 const { sendNotification } = require('../services/notificationService');
 
-// Allow Admin, Doctor, Nurse, Receptionist access to Emergency routes
+// Base router gate: only clinical & operational staff can access Emergency routes
 router.use(requireRole('Admin', 'Doctor', 'Nurse', 'Receptionist'));
 
 // Helper: Calculate dynamic emergency priority score
@@ -16,10 +17,42 @@ function computePriorityScore(priority, waitMinutes) {
     return base + (Math.max(0, waitMinutes) * mult);
 }
 
+// Helper: Resolve department_id by department_name from DEPARTMENT table (no hardcoded IDs)
+async function resolveDepartmentByName(connOrPool, departmentName) {
+    const [rows] = await connOrPool.query(
+        'SELECT department_id, department_name FROM DEPARTMENT WHERE department_name = ? LIMIT 1',
+        [departmentName]
+    );
+    if (rows.length) return rows[0];
+    const [fallback] = await connOrPool.query(
+        'SELECT department_id, department_name FROM DEPARTMENT ORDER BY department_id LIMIT 1'
+    );
+    return fallback[0] || { department_id: null, department_name: departmentName };
+}
+
+// Helper: Generate next EMG-YYYY-XXX concurrency-safely inside an open transaction
+async function generateNextEmgNumber(conn) {
+    const currentYear = new Date().getFullYear();
+    await conn.query(
+        'INSERT INTO EMERGENCY_SEQUENCE (seq_year, last_val) VALUES (?, 0) ON DUPLICATE KEY UPDATE last_val = last_val',
+        [currentYear]
+    );
+    const [[seqRow]] = await conn.query(
+        'SELECT last_val FROM EMERGENCY_SEQUENCE WHERE seq_year = ? FOR UPDATE',
+        [currentYear]
+    );
+    const nextVal = Number(seqRow ? seqRow.last_val : 0) + 1;
+    await conn.query(
+        'UPDATE EMERGENCY_SEQUENCE SET last_val = ? WHERE seq_year = ?',
+        [nextVal, currentYear]
+    );
+    return `EMG-${currentYear}-${String(nextVal).padStart(3, '0')}`;
+}
+
 // -----------------------------------------------------------------------------
-// 1. Emergency Dashboard KPIs
+// 1. Emergency Dashboard KPIs (Admin, Doctor, Nurse, Receptionist)
 // -----------------------------------------------------------------------------
-router.get('/dashboard', async (req, res) => {
+router.get('/dashboard', requireRole('Admin', 'Doctor', 'Nurse', 'Receptionist'), async (req, res) => {
     try {
         const [[activeCases]] = await mysqlPool.query(
             "SELECT COUNT(*) AS total FROM EMERGENCY_CASE WHERE status NOT IN ('Discharged', 'Transferred')"
@@ -34,15 +67,33 @@ router.get('/dashboard', async (req, res) => {
             "SELECT COUNT(*) AS total FROM EMERGENCY_CASE WHERE status = 'Waiting'"
         );
         const [[availEmgBeds]] = await mysqlPool.query(
-            "SELECT COUNT(*) AS total FROM BED WHERE ward_name IN ('Emergency Ward', 'ICU') AND status = 'Available'"
+            `SELECT COUNT(*) AS total
+             FROM BED b JOIN WARD w ON b.ward_id = w.ward_id
+             WHERE w.ward_name IN ('Emergency Ward', 'ICU') AND b.status = 'Available'`
         );
         const [[occupiedEmgBeds]] = await mysqlPool.query(
-            "SELECT COUNT(*) AS total FROM BED WHERE ward_name = 'Emergency Ward' AND status = 'Occupied'"
+            `SELECT COUNT(*) AS total
+             FROM BED b JOIN WARD w ON b.ward_id = w.ward_id
+             WHERE w.ward_name = 'Emergency Ward' AND b.status = 'Occupied'`
         );
         const [[availDoctors]] = await mysqlPool.query(
-            `SELECT COUNT(DISTINCT d.doctor_id) AS total FROM DOCTOR d
+            `SELECT COUNT(DISTINCT d.doctor_id) AS total
+             FROM DOCTOR d
+             JOIN \`USER\` u ON d.doctor_id = u.user_id
              JOIN DOCTOR_SHIFT ds ON d.doctor_id = ds.doctor_id
-             WHERE ds.shift_date = CURDATE() AND ds.is_on_duty = TRUE`
+             WHERE u.is_active = TRUE
+               AND ds.shift_date = CURDATE()
+               AND ds.is_on_duty = TRUE
+               AND (
+                 (ds.start_time <= ds.end_time AND CURTIME() BETWEEN ds.start_time AND ds.end_time)
+                 OR (ds.start_time > ds.end_time AND (CURTIME() >= ds.start_time OR CURTIME() <= ds.end_time))
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM DOCTOR_LEAVE dl
+                 WHERE dl.doctor_id = d.doctor_id
+                   AND dl.status = 'Approved'
+                   AND CURDATE() BETWEEN dl.start_date AND dl.end_date
+               )`
         );
         const [[ambulancesOnDuty]] = await mysqlPool.query(
             "SELECT COUNT(*) AS total FROM AMBULANCE WHERE status = 'On Duty'"
@@ -69,9 +120,9 @@ router.get('/dashboard', async (req, res) => {
 });
 
 // -----------------------------------------------------------------------------
-// 2. Emergency Queue (Priority-ordered)
+// 2. Emergency Queue (Priority-ordered; 3NF via assignment history tables)
 // -----------------------------------------------------------------------------
-router.get('/queue', async (req, res) => {
+router.get('/queue', requireRole('Admin', 'Doctor', 'Nurse', 'Receptionist'), async (req, res) => {
     try {
         const query = `
             SELECT 
@@ -87,12 +138,12 @@ router.get('/queue', async (req, res) => {
                 ec.initial_complaint,
                 ec.triage_priority,
                 ec.status,
-                ec.assigned_doctor_id,
+                eda.doctor_id AS assigned_doctor_id,
                 ud.name AS assigned_doctor_name,
                 doc.specialization AS doctor_specialization,
-                ec.assigned_bed_id,
+                eba.bed_id AS assigned_bed_id,
                 b.bed_number,
-                b.ward_name,
+                w.ward_name,
                 ec.department_id,
                 dep.department_name,
                 amb.vehicle_number AS ambulance_number,
@@ -101,9 +152,12 @@ router.get('/queue', async (req, res) => {
             FROM EMERGENCY_CASE ec
             LEFT JOIN PATIENT p ON ec.patient_id = p.patient_id
             LEFT JOIN \`USER\` u ON p.patient_id = u.user_id
-            LEFT JOIN DOCTOR doc ON ec.assigned_doctor_id = doc.doctor_id
+            LEFT JOIN EMERGENCY_DOCTOR_ASSIGNMENT eda ON ec.case_id = eda.case_id AND eda.is_active = TRUE
+            LEFT JOIN DOCTOR doc ON eda.doctor_id = doc.doctor_id
             LEFT JOIN \`USER\` ud ON doc.doctor_id = ud.user_id
-            LEFT JOIN BED b ON ec.assigned_bed_id = b.bed_id
+            LEFT JOIN EMERGENCY_BED_ASSIGNMENT eba ON ec.case_id = eba.case_id AND eba.is_active = TRUE
+            LEFT JOIN BED b ON eba.bed_id = b.bed_id
+            LEFT JOIN WARD w ON b.ward_id = w.ward_id
             LEFT JOIN DEPARTMENT dep ON ec.department_id = dep.department_id
             LEFT JOIN AMBULANCE amb ON ec.ambulance_id = amb.ambulance_id
             WHERE ec.status NOT IN ('Discharged', 'Transferred')
@@ -112,7 +166,6 @@ router.get('/queue', async (req, res) => {
 
         const [rows] = await mysqlPool.query(query);
 
-        // Compute dynamic priority scores and sort
         const casesWithScores = rows.map(item => {
             const score = computePriorityScore(item.triage_priority, item.waiting_minutes);
             return {
@@ -121,10 +174,8 @@ router.get('/queue', async (req, res) => {
             };
         });
 
-        // Priority Sort: P1 > P2 > P3 > P4, then highest score/longest wait
         casesWithScores.sort((a, b) => b.priority_score - a.priority_score);
 
-        // Assign queue position numbers
         casesWithScores.forEach((item, index) => {
             item.queue_position = index + 1;
         });
@@ -137,9 +188,9 @@ router.get('/queue', async (req, res) => {
 });
 
 // -----------------------------------------------------------------------------
-// 3. Register Emergency Patient (Supports both registered & temporary/unconscious)
+// 3. Register Emergency Patient (Admin, Receptionist, Nurse)
 // -----------------------------------------------------------------------------
-router.post('/register', async (req, res) => {
+router.post('/register', requireRole('Admin', 'Receptionist', 'Nurse'), async (req, res) => {
     const {
         patient_id,
         temp_patient_name,
@@ -165,25 +216,26 @@ router.post('/register', async (req, res) => {
     try {
         await conn.beginTransaction();
 
-        // Generate next Emergency ID: EMG-YYYY-XXX
-        const currentYear = new Date().getFullYear();
-        const [[countRow]] = await conn.query(
-            "SELECT COUNT(*) AS total FROM EMERGENCY_CASE WHERE YEAR(arrival_time) = ?",
-            [currentYear]
-        );
-        const sequence = String((countRow.total || 0) + 1).padStart(3, '0');
-        const emgNumber = `EMG-${currentYear}-${sequence}`;
+        // Concurrency-safe sequence generation for EMG-YYYY-XXX
+        const emgNumber = await generateNextEmgNumber(conn);
 
-        // Default initial department
-        let departmentId = 6; // Emergency Medicine
+        // Determine target department by name (never hardcoded numbers)
+        let targetDeptName = 'Emergency Medicine';
         const complaintLower = initial_complaint.toLowerCase();
         if (complaintLower.includes('chest') || complaintLower.includes('heart') || complaintLower.includes('cardiac')) {
-            departmentId = 1; // Cardiology
+            targetDeptName = 'Cardiology';
         } else if (complaintLower.includes('fracture') || complaintLower.includes('bone') || complaintLower.includes('fall')) {
-            departmentId = 2; // Orthopedics
+            targetDeptName = 'Orthopedics';
         } else if (temp_patient_age && Number(temp_patient_age) < 14) {
-            departmentId = 4; // Pediatrics
+            targetDeptName = 'Pediatrics';
+        } else if (complaintLower.includes('fever') || complaintLower.includes('infect')) {
+            targetDeptName = 'General Medicine';
         }
+
+        const deptRow = await resolveDepartmentByName(conn, targetDeptName);
+        const normalizedGender = temp_patient_gender
+            ? (['M', 'F', 'O'].includes(temp_patient_gender) ? temp_patient_gender : 'O')
+            : null;
 
         const [insertResult] = await conn.query(
             `INSERT INTO EMERGENCY_CASE (
@@ -195,19 +247,27 @@ router.post('/register', async (req, res) => {
                 emgNumber,
                 patient_id ? Number(patient_id) : null,
                 temp_patient_name || null,
-                temp_patient_gender || null,
+                normalizedGender,
                 temp_patient_age ? Number(temp_patient_age) : null,
                 contact_phone || null,
                 emergency_contact || null,
                 arrival_method,
                 ambulance_id ? Number(ambulance_id) : null,
                 initial_complaint.trim(),
-                triage_priority,
-                departmentId
+                ['P1', 'P2', 'P3', 'P4'].includes(triage_priority) ? triage_priority : 'P3',
+                deptRow.department_id
             ]
         );
 
         const newCaseId = insertResult.insertId;
+
+        // If arrived by ambulance, link any active AMBULANCE_DISPATCH row for this ambulance
+        if (ambulance_id) {
+            await conn.query(
+                "UPDATE AMBULANCE_DISPATCH SET case_id = COALESCE(case_id, ?) WHERE ambulance_id = ? AND status = 'In Transit'",
+                [newCaseId, Number(ambulance_id)]
+            );
+        }
 
         await conn.commit();
 
@@ -248,24 +308,26 @@ router.post('/register', async (req, res) => {
 });
 
 // -----------------------------------------------------------------------------
-// 4. Single Case Details
+// 4. Single Case Details (Admin, Doctor, Nurse, Receptionist)
 // -----------------------------------------------------------------------------
-router.get('/cases/:id', async (req, res) => {
+router.get('/cases/:id', requireRole('Admin', 'Doctor', 'Nurse', 'Receptionist'), async (req, res) => {
     try {
         const [[caseRow]] = await mysqlPool.query(
             `SELECT 
                 ec.*,
+                eda.doctor_id AS assigned_doctor_id,
+                eba.bed_id AS assigned_bed_id,
                 COALESCE(u.name, ec.temp_patient_name, 'Unidentified Patient') AS patient_name,
                 COALESCE(u.email, '--') AS patient_email,
                 COALESCE(u.phone, ec.contact_phone, '--') AS phone,
                 COALESCE(p.gender, ec.temp_patient_gender, '--') AS gender,
                 COALESCE(p.blood_group, '--') AS blood_group,
-                COALESCE(p.allergies, 'None documented') AS allergies,
+                COALESCE(vpa.allergies, 'None documented') AS allergies,
                 COALESCE(TIMESTAMPDIFF(YEAR, p.dob, CURDATE()), ec.temp_patient_age, '--') AS age,
                 ud.name AS assigned_doctor_name,
                 doc.specialization AS doctor_specialization,
                 b.bed_number,
-                b.ward_name,
+                w.ward_name,
                 dep.department_name,
                 amb.vehicle_number,
                 amb.driver_name,
@@ -273,9 +335,13 @@ router.get('/cases/:id', async (req, res) => {
              FROM EMERGENCY_CASE ec
              LEFT JOIN PATIENT p ON ec.patient_id = p.patient_id
              LEFT JOIN \`USER\` u ON p.patient_id = u.user_id
-             LEFT JOIN DOCTOR doc ON ec.assigned_doctor_id = doc.doctor_id
+             LEFT JOIN vw_patient_allergies vpa ON p.patient_id = vpa.patient_id
+             LEFT JOIN EMERGENCY_DOCTOR_ASSIGNMENT eda ON ec.case_id = eda.case_id AND eda.is_active = TRUE
+             LEFT JOIN DOCTOR doc ON eda.doctor_id = doc.doctor_id
              LEFT JOIN \`USER\` ud ON doc.doctor_id = ud.user_id
-             LEFT JOIN BED b ON ec.assigned_bed_id = b.bed_id
+             LEFT JOIN EMERGENCY_BED_ASSIGNMENT eba ON ec.case_id = eba.case_id AND eba.is_active = TRUE
+             LEFT JOIN BED b ON eba.bed_id = b.bed_id
+             LEFT JOIN WARD w ON b.ward_id = w.ward_id
              LEFT JOIN DEPARTMENT dep ON ec.department_id = dep.department_id
              LEFT JOIN AMBULANCE amb ON ec.ambulance_id = amb.ambulance_id
              WHERE ec.case_id = ?`,
@@ -286,7 +352,6 @@ router.get('/cases/:id', async (req, res) => {
             return res.status(404).json({ error: 'Emergency case not found' });
         }
 
-        // Triage history
         const [triageHistory] = await mysqlPool.query(
             `SELECT ta.*, un.name AS nurse_name
              FROM TRIAGE_ASSESSMENT ta
@@ -296,7 +361,6 @@ router.get('/cases/:id', async (req, res) => {
             [req.params.id]
         );
 
-        // Treatment and clinical notes
         const [treatments] = await mysqlPool.query(
             `SELECT etl.*, u.name AS doctor_name
              FROM EMERGENCY_TREATMENT_LOG etl
@@ -306,7 +370,6 @@ router.get('/cases/:id', async (req, res) => {
             [req.params.id]
         );
 
-        // Vitals recordings
         const [vitals] = await mysqlPool.query(
             `SELECT pv.*, u.name AS recorded_by_name
              FROM PATIENT_VITALS pv
@@ -316,7 +379,6 @@ router.get('/cases/:id', async (req, res) => {
             [req.params.id]
         );
 
-        // Blood requests
         const [bloodRequests] = await mysqlPool.query(
             `SELECT br.*, u.name AS requested_by_name
              FROM BLOOD_REQUEST br
@@ -326,7 +388,6 @@ router.get('/cases/:id', async (req, res) => {
             [req.params.id]
         );
 
-        // Priority audit history
         const [priorityLogs] = await mysqlPool.query(
             `SELECT epl.*, u.name AS changed_by_name
              FROM EMERGENCY_PRIORITY_LOG epl
@@ -336,13 +397,34 @@ router.get('/cases/:id', async (req, res) => {
             [req.params.id]
         );
 
+        const [doctorAssignments] = await mysqlPool.query(
+            `SELECT eda.*, u.name AS doctor_name
+             FROM EMERGENCY_DOCTOR_ASSIGNMENT eda
+             JOIN \`USER\` u ON eda.doctor_id = u.user_id
+             WHERE eda.case_id = ?
+             ORDER BY eda.assigned_at DESC`,
+            [req.params.id]
+        );
+
+        const [bedAssignments] = await mysqlPool.query(
+            `SELECT eba.*, b.bed_number, w.ward_name
+             FROM EMERGENCY_BED_ASSIGNMENT eba
+             JOIN BED b ON eba.bed_id = b.bed_id
+             JOIN WARD w ON b.ward_id = w.ward_id
+             WHERE eba.case_id = ?
+             ORDER BY eba.assigned_at DESC`,
+            [req.params.id]
+        );
+
         res.json({
             case: caseRow,
             triage_history: triageHistory,
             treatments,
             vitals,
             blood_requests: bloodRequests,
-            priority_logs: priorityLogs
+            priority_logs: priorityLogs,
+            doctor_assignments: doctorAssignments,
+            bed_assignments: bedAssignments
         });
     } catch (err) {
         console.error('Case detail error:', err);
@@ -351,9 +433,9 @@ router.get('/cases/:id', async (req, res) => {
 });
 
 // -----------------------------------------------------------------------------
-// 5. Triage Assessment (Nurses & Doctors)
+// 5. Triage Assessment (Admin, Doctor, Nurse)
 // -----------------------------------------------------------------------------
-router.post('/triage/:id', async (req, res) => {
+router.post('/triage/:id', requireRole('Admin', 'Doctor', 'Nurse'), async (req, res) => {
     const {
         bp_systolic,
         bp_diastolic,
@@ -378,7 +460,12 @@ router.post('/triage/:id', async (req, res) => {
     try {
         await conn.beginTransaction();
 
-        // Insert assessment
+        const [[ec]] = await conn.query('SELECT patient_id, emg_number FROM EMERGENCY_CASE WHERE case_id = ? FOR UPDATE', [req.params.id]);
+        if (!ec) {
+            await conn.rollback();
+            return res.status(404).json({ error: 'Emergency case not found' });
+        }
+
         await conn.query(
             `INSERT INTO TRIAGE_ASSESSMENT (
                 case_id, nurse_id, bp_systolic, bp_diastolic, heart_rate, spo2,
@@ -404,7 +491,6 @@ router.post('/triage/:id', async (req, res) => {
             ]
         );
 
-        // Update emergency case priority and status
         await conn.query(
             `UPDATE EMERGENCY_CASE 
              SET triage_priority = ?, 
@@ -413,36 +499,31 @@ router.post('/triage/:id', async (req, res) => {
             [priority, req.params.id]
         );
 
-        // Also record in PATIENT_VITALS
-        const [[ec]] = await conn.query('SELECT patient_id, emg_number FROM EMERGENCY_CASE WHERE case_id = ?', [req.params.id]);
-        if (ec) {
-            await conn.query(
-                `INSERT INTO PATIENT_VITALS (
-                    patient_id, case_id, recorded_by, bp_systolic, bp_diastolic,
-                    heart_rate, spo2, temperature, respiratory_rate, notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [
-                    ec.patient_id,
-                    req.params.id,
-                    req.session.user.id,
-                    bp_systolic ? Number(bp_systolic) : null,
-                    bp_diastolic ? Number(bp_diastolic) : null,
-                    heart_rate ? Number(heart_rate) : null,
-                    spo2 ? Number(spo2) : null,
-                    temperature ? Number(temperature) : null,
-                    respiratory_rate ? Number(respiratory_rate) : null,
-                    `Triage vitals recorded: Priority ${priority}`
-                ]
-            );
-        }
+        await conn.query(
+            `INSERT INTO PATIENT_VITALS (
+                patient_id, case_id, recorded_by, bp_systolic, bp_diastolic,
+                heart_rate, spo2, temperature, respiratory_rate, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+                ec.patient_id,
+                req.params.id,
+                req.session.user.id,
+                bp_systolic ? Number(bp_systolic) : null,
+                bp_diastolic ? Number(bp_diastolic) : null,
+                heart_rate ? Number(heart_rate) : null,
+                spo2 ? Number(spo2) : null,
+                temperature ? Number(temperature) : null,
+                respiratory_rate ? Number(respiratory_rate) : null,
+                `Triage vitals recorded: Priority ${priority}`
+            ]
+        );
 
         await conn.commit();
 
-        // Broadcast notifications
         if (priority === 'P1') {
             await sendNotification({
                 role_name: 'Doctor',
-                message: `CRITICAL ALERT: Case ${ec ? ec.emg_number : req.params.id} classified as P1 Critical! SpO2: ${spo2 || '--'}%, HR: ${heart_rate || '--'}, BP: ${bp_systolic || '--'}/${bp_diastolic || '--'}`,
+                message: `CRITICAL ALERT: Case ${ec.emg_number} classified as P1 Critical! SpO2: ${spo2 || '--'}%, HR: ${heart_rate || '--'}, BP: ${bp_systolic || '--'}/${bp_diastolic || '--'}`,
                 event_type: 'p1_triage'
             });
         }
@@ -458,9 +539,9 @@ router.post('/triage/:id', async (req, res) => {
 });
 
 // -----------------------------------------------------------------------------
-// 6. Manual Priority Change with Mandatory Reason
+// 6. Manual Priority Change with Mandatory Reason (Admin, Doctor, Nurse)
 // -----------------------------------------------------------------------------
-router.patch('/priority/:id', async (req, res) => {
+router.patch('/priority/:id', requireRole('Admin', 'Doctor', 'Nurse'), async (req, res) => {
     const { new_priority, reason } = req.body;
 
     if (!['P1', 'P2', 'P3', 'P4'].includes(new_priority)) {
@@ -474,7 +555,7 @@ router.patch('/priority/:id', async (req, res) => {
     try {
         await conn.beginTransaction();
 
-        const [[existing]] = await conn.query('SELECT triage_priority, emg_number FROM EMERGENCY_CASE WHERE case_id = ?', [req.params.id]);
+        const [[existing]] = await conn.query('SELECT triage_priority, emg_number FROM EMERGENCY_CASE WHERE case_id = ? FOR UPDATE', [req.params.id]);
         if (!existing) {
             await conn.rollback();
             return res.status(404).json({ error: 'Emergency case not found' });
@@ -511,9 +592,11 @@ router.patch('/priority/:id', async (req, res) => {
 });
 
 // -----------------------------------------------------------------------------
-// 7. Signature Feature: Emergency Priority Engine
+// 7. Signature Feature: Emergency Priority Engine (Admin, Doctor, Nurse)
+//    - Looks up department IDs by name from DEPARTMENT (no hardcoded numbers)
+//    - Excludes off-shift doctors and on-leave doctors
 // -----------------------------------------------------------------------------
-router.get('/priority-engine/:id', async (req, res) => {
+router.get('/priority-engine/:id', requireRole('Admin', 'Doctor', 'Nurse'), async (req, res) => {
     try {
         const [[ec]] = await mysqlPool.query(
             `SELECT 
@@ -533,7 +616,6 @@ router.get('/priority-engine/:id', async (req, res) => {
             return res.status(404).json({ error: 'Emergency case not found' });
         }
 
-        // Get latest triage
         const [[latestTriage]] = await mysqlPool.query(
             'SELECT * FROM TRIAGE_ASSESSMENT WHERE case_id = ? ORDER BY assessed_at DESC LIMIT 1',
             [req.params.id]
@@ -543,34 +625,34 @@ router.get('/priority-engine/:id', async (req, res) => {
         const waitMinutes = ec.waiting_minutes || 0;
         const priorityScore = computePriorityScore(currentPriority, waitMinutes);
 
-        // Determine clinical symptoms keyword cluster
         const complaint = (ec.initial_complaint || '').toLowerCase();
         const symptoms = ((latestTriage && latestTriage.symptoms) || '').toLowerCase();
         const combinedText = complaint + ' ' + symptoms;
 
-        let targetDeptId = 6; // Emergency Medicine default
         let targetDeptName = 'Emergency Medicine';
         let deptReason = 'Primary acute emergency evaluation and stabilization';
 
         if (combinedText.includes('chest') || combinedText.includes('heart') || combinedText.includes('cardiac') || combinedText.includes('ecg') || combinedText.includes('infarct') || combinedText.includes('st-elevation')) {
-            targetDeptId = 1;
             targetDeptName = 'Cardiology';
             deptReason = 'Acute coronary / cardiac symptom presentation requiring cardiologist expertise';
         } else if (combinedText.includes('fracture') || combinedText.includes('bone') || combinedText.includes('fall') || combinedText.includes('dislocat') || combinedText.includes('tibial') || combinedText.includes('trauma')) {
-            targetDeptId = 2;
             targetDeptName = 'Orthopedics';
             deptReason = 'Musculoskeletal trauma / suspected fracture requiring orthopedic surgical evaluation';
         } else if (Number(ec.age) < 14) {
-            targetDeptId = 4;
             targetDeptName = 'Pediatrics';
             deptReason = 'Pediatric age patient requiring specialized pediatric resuscitation and care';
         } else if (combinedText.includes('fever') || combinedText.includes('infect') || combinedText.includes('weakness') || combinedText.includes('dehydrat')) {
-            targetDeptId = 3;
             targetDeptName = 'General Medicine';
             deptReason = 'Infectious / febrile presentation suitable for internal and general medicine';
         }
 
-        // Fetch doctors with active shifts and calculate their real current emergency workload
+        // Look up department_id dynamically by department_name
+        const deptInfo = await resolveDepartmentByName(mysqlPool, targetDeptName);
+        const targetDeptId = deptInfo.department_id;
+        targetDeptName = deptInfo.department_name;
+
+        // Fetch ONLY doctors who are currently on an active shift (on duty today and within shift hours)
+        // AND not on approved leave today.
         const [doctors] = await mysqlPool.query(
             `SELECT 
                 d.doctor_id,
@@ -582,40 +664,42 @@ router.get('/priority-engine/:id', async (req, res) => {
                 ds.shift_type,
                 ds.start_time,
                 ds.end_time,
-                (SELECT COUNT(*) FROM EMERGENCY_CASE aec 
-                 WHERE aec.assigned_doctor_id = d.doctor_id 
-                 AND aec.status IN ('Assigned', 'In Treatment')) AS active_emergency_cases,
-                (SELECT COUNT(*) FROM APPOINTMENT ap 
+                (SELECT COUNT(*)
+                 FROM EMERGENCY_DOCTOR_ASSIGNMENT eda
+                 JOIN EMERGENCY_CASE aec ON eda.case_id = aec.case_id
+                 WHERE eda.doctor_id = d.doctor_id
+                   AND eda.is_active = TRUE
+                   AND aec.status IN ('Assigned', 'In Treatment')) AS active_emergency_cases,
+                (SELECT COUNT(*)
+                 FROM APPOINTMENT ap 
                  WHERE ap.doctor_id = d.doctor_id 
-                 AND ap.appointment_date = CURDATE() 
-                 AND ap.status IN ('Scheduled', 'Confirmed')) AS today_appointments
+                   AND ap.appointment_date = CURDATE() 
+                   AND ap.status IN ('Scheduled', 'Confirmed', 'Checked In')) AS today_appointments
              FROM DOCTOR d
              JOIN \`USER\` u ON d.doctor_id = u.user_id
              JOIN DEPARTMENT dept ON d.department_id = dept.department_id
-             LEFT JOIN DOCTOR_SHIFT ds ON d.doctor_id = ds.doctor_id AND ds.shift_date = CURDATE() AND ds.is_on_duty = TRUE
+             JOIN DOCTOR_SHIFT ds
+               ON d.doctor_id = ds.doctor_id
+              AND ds.shift_date = CURDATE()
+              AND ds.is_on_duty = TRUE
+              AND (
+                (ds.start_time <= ds.end_time AND CURTIME() BETWEEN ds.start_time AND ds.end_time)
+                OR (ds.start_time > ds.end_time AND (CURTIME() >= ds.start_time OR CURTIME() <= ds.end_time))
+              )
              WHERE u.is_active = TRUE
                AND NOT EXISTS (
                    SELECT 1 FROM DOCTOR_LEAVE dl 
                    WHERE dl.doctor_id = d.doctor_id 
-                   AND dl.status = 'Approved' 
-                   AND CURDATE() BETWEEN dl.start_date AND dl.end_date
+                     AND dl.status = 'Approved' 
+                     AND CURDATE() BETWEEN dl.start_date AND dl.end_date
                )`
         );
 
-        // Score doctors for recommendation
+        // Score eligible on-shift, non-leave doctors
         const scoredDoctors = doctors.map(doc => {
-            let docScore = 100;
-            const reasons = [];
+            let docScore = 140;
+            const reasons = [`On duty (${doc.shift_type} shift ${doc.start_time}–${doc.end_time})`];
 
-            // On duty today
-            if (doc.shift_type) {
-                docScore += 40;
-                reasons.push(`On duty (${doc.shift_type} shift)`);
-            } else {
-                reasons.push('Off active shift schedule');
-            }
-
-            // Department / specialization match
             if (doc.department_id === targetDeptId) {
                 docScore += 50;
                 reasons.push(`Direct specialty match (${doc.specialization})`);
@@ -624,8 +708,7 @@ router.get('/priority-engine/:id', async (req, res) => {
                 reasons.push('General / Emergency coverage capability');
             }
 
-            // Workload penalty
-            const load = (doc.active_emergency_cases * 15) + (doc.today_appointments * 5);
+            const load = (Number(doc.active_emergency_cases) * 15) + (Number(doc.today_appointments) * 5);
             docScore -= load;
             reasons.push(`Current workload: ${doc.active_emergency_cases} emergency cases, ${doc.today_appointments} appointments`);
 
@@ -636,23 +719,24 @@ router.get('/priority-engine/:id', async (req, res) => {
             };
         });
 
-        // Sort doctors descending by score
         scoredDoctors.sort((a, b) => b.match_score - a.match_score);
 
         const recommendedDoctor = scoredDoctors[0] || null;
 
-        // Bed Recommendation:
-        // P1 with severe hypoxia or low GCS gets ICU bed recommendation if available, otherwise Emergency Ward bed
+        // Bed Recommendation (normalized via BED + WARD)
         const isCriticalICU = currentPriority === 'P1' && (
             (latestTriage && latestTriage.spo2 && latestTriage.spo2 < 90) ||
             (latestTriage && latestTriage.gcs_score && latestTriage.gcs_score <= 8)
         );
 
-        let bedQuery = "SELECT * FROM BED WHERE status = 'Available' ";
+        let bedQuery = `SELECT b.bed_id, b.ward_id, w.ward_name, b.bed_number, b.status
+                        FROM BED b
+                        JOIN WARD w ON b.ward_id = w.ward_id
+                        WHERE b.status = 'Available' `;
         if (isCriticalICU) {
-            bedQuery += "ORDER BY CASE WHEN ward_name = 'ICU' THEN 0 ELSE 1 END, bed_number";
+            bedQuery += "ORDER BY CASE WHEN w.ward_name = 'ICU' THEN 0 ELSE 1 END, b.bed_number";
         } else {
-            bedQuery += "ORDER BY CASE WHEN ward_name = 'Emergency Ward' THEN 0 WHEN ward_name = 'ICU' THEN 2 ELSE 1 END, bed_number";
+            bedQuery += "ORDER BY CASE WHEN w.ward_name = 'Emergency Ward' THEN 0 WHEN w.ward_name = 'ICU' THEN 2 ELSE 1 END, b.bed_number";
         }
 
         const [availableBeds] = await mysqlPool.query(bedQuery);
@@ -688,7 +772,7 @@ router.get('/priority-engine/:id', async (req, res) => {
                 name: recommendedDoctor.name,
                 specialization: recommendedDoctor.specialization,
                 department_name: recommendedDoctor.department_name,
-                shift_type: recommendedDoctor.shift_type || 'On Call',
+                shift_type: recommendedDoctor.shift_type,
                 active_workload: recommendedDoctor.active_emergency_cases,
                 match_score: recommendedDoctor.match_score,
                 reason: recommendedDoctor.reasoning
@@ -710,55 +794,107 @@ router.get('/priority-engine/:id', async (req, res) => {
 });
 
 // -----------------------------------------------------------------------------
-// 8. Confirm Doctor & Bed Allocation
+// 8. Confirm Doctor & Bed Allocation (Admin, Doctor, Nurse)
+//    - Transactional with SELECT ... FOR UPDATE
+//    - Requires target bed status === 'Available'
+//    - Records history in EMERGENCY_DOCTOR_ASSIGNMENT & EMERGENCY_BED_ASSIGNMENT
 // -----------------------------------------------------------------------------
-router.post('/allocate/:id', async (req, res) => {
+router.post('/allocate/:id', requireRole('Admin', 'Doctor', 'Nurse'), async (req, res) => {
     const { doctor_id, bed_id, department_id, override_reason } = req.body;
 
     const conn = await mysqlPool.getConnection();
     try {
         await conn.beginTransaction();
 
-        const [[ec]] = await conn.query('SELECT * FROM EMERGENCY_CASE WHERE case_id = ?', [req.params.id]);
+        const [[ec]] = await conn.query('SELECT * FROM EMERGENCY_CASE WHERE case_id = ? FOR UPDATE', [req.params.id]);
         if (!ec) {
             await conn.rollback();
             return res.status(404).json({ error: 'Emergency case not found' });
         }
 
-        // If previously assigned to a different bed, release old bed
-        if (ec.assigned_bed_id && bed_id && ec.assigned_bed_id !== Number(bed_id)) {
-            await conn.query("UPDATE BED SET status='Cleaning', patient_id=NULL WHERE bed_id=?", [ec.assigned_bed_id]);
-        }
+        // Check existing active assignments
+        const [[currentDocAssign]] = await conn.query(
+            'SELECT * FROM EMERGENCY_DOCTOR_ASSIGNMENT WHERE case_id = ? AND is_active = TRUE FOR UPDATE',
+            [req.params.id]
+        );
+        const [[currentBedAssign]] = await conn.query(
+            'SELECT * FROM EMERGENCY_BED_ASSIGNMENT WHERE case_id = ? AND is_active = TRUE FOR UPDATE',
+            [req.params.id]
+        );
 
-        // Reserve new bed
         let bedNumber = '';
         if (bed_id) {
-            const [[targetBed]] = await conn.query('SELECT * FROM BED WHERE bed_id = ? FOR UPDATE', [bed_id]);
+            const [[targetBed]] = await conn.query(
+                `SELECT b.*, w.ward_name
+                 FROM BED b JOIN WARD w ON b.ward_id = w.ward_id
+                 WHERE b.bed_id = ? FOR UPDATE`,
+                [bed_id]
+            );
             if (!targetBed) {
                 await conn.rollback();
                 return res.status(404).json({ error: 'Selected bed does not exist' });
             }
-            if (targetBed.status === 'Occupied' && targetBed.bed_id !== ec.assigned_bed_id) {
+
+            const sameBedAsCurrent = currentBedAssign && Number(currentBedAssign.bed_id) === Number(bed_id);
+            if (!sameBedAsCurrent && targetBed.status !== 'Available') {
                 await conn.rollback();
-                return res.status(409).json({ error: `Bed ${targetBed.bed_number} is already occupied` });
+                return res.status(409).json({
+                    error: `Bed ${targetBed.bed_number} is not available (current status: ${targetBed.status})`
+                });
             }
+
             bedNumber = targetBed.bed_number;
-            await conn.query("UPDATE BED SET status='Occupied', patient_id=? WHERE bed_id=?", [ec.patient_id, bed_id]);
+
+            if (!sameBedAsCurrent) {
+                // Release previous bed if assigned
+                if (currentBedAssign) {
+                    await conn.query("UPDATE BED SET status = 'Cleaning' WHERE bed_id = ?", [currentBedAssign.bed_id]);
+                    await conn.query(
+                        'UPDATE EMERGENCY_BED_ASSIGNMENT SET is_active = FALSE, released_at = NOW() WHERE assignment_id = ?',
+                        [currentBedAssign.assignment_id]
+                    );
+                }
+                // Occupy new bed and insert active assignment row
+                await conn.query("UPDATE BED SET status = 'Occupied' WHERE bed_id = ?", [bed_id]);
+                await conn.query(
+                    'INSERT INTO EMERGENCY_BED_ASSIGNMENT (case_id, bed_id, assigned_by, is_active) VALUES (?, ?, ?, TRUE)',
+                    [req.params.id, Number(bed_id), req.session.user.id]
+                );
+            }
         }
 
-        // Update emergency case
+        if (doctor_id) {
+            const [[docExists]] = await conn.query('SELECT doctor_id FROM DOCTOR WHERE doctor_id = ?', [doctor_id]);
+            if (!docExists) {
+                await conn.rollback();
+                return res.status(404).json({ error: 'Selected doctor does not exist' });
+            }
+            const sameDocAsCurrent = currentDocAssign && Number(currentDocAssign.doctor_id) === Number(doctor_id);
+            if (!sameDocAsCurrent) {
+                if (currentDocAssign) {
+                    await conn.query(
+                        'UPDATE EMERGENCY_DOCTOR_ASSIGNMENT SET is_active = FALSE, unassigned_at = NOW() WHERE assignment_id = ?',
+                        [currentDocAssign.assignment_id]
+                    );
+                }
+                await conn.query(
+                    'INSERT INTO EMERGENCY_DOCTOR_ASSIGNMENT (case_id, doctor_id, assigned_by, override_reason, is_active) VALUES (?, ?, ?, ?, TRUE)',
+                    [req.params.id, Number(doctor_id), req.session.user.id, override_reason || null]
+                );
+            }
+        }
+
+        // Update emergency case status and department
         await conn.query(
             `UPDATE EMERGENCY_CASE 
-             SET assigned_doctor_id = COALESCE(?, assigned_doctor_id),
-                 assigned_bed_id = COALESCE(?, assigned_bed_id),
-                 department_id = COALESCE(?, department_id),
-                 status = CASE WHEN status = 'Waiting' OR status = 'Triage' THEN 'Assigned' ELSE status END
+             SET department_id = COALESCE(?, department_id),
+                 status = CASE WHEN status IN ('Waiting', 'Triage') THEN 'Assigned' ELSE status END
              WHERE case_id = ?`,
-            [doctor_id ? Number(doctor_id) : null, bed_id ? Number(bed_id) : null, department_id ? Number(department_id) : null, req.params.id]
+            [department_id ? Number(department_id) : null, req.params.id]
         );
 
-        // Record treatment action log
-        let logDesc = `Allocation confirmed: Doctor ID ${doctor_id || ec.assigned_doctor_id}, Bed ${bedNumber || 'Not changed'}.`;
+        const finalDocId = doctor_id || (currentDocAssign && currentDocAssign.doctor_id) || 'Unchanged';
+        let logDesc = `Allocation confirmed: Doctor ID ${finalDocId}, Bed ${bedNumber || 'Not changed'}.`;
         if (override_reason) {
             logDesc += ` [Manual Override Reason: ${override_reason}]`;
         }
@@ -769,7 +905,6 @@ router.post('/allocate/:id', async (req, res) => {
 
         await conn.commit();
 
-        // Notify assigned doctor
         if (doctor_id) {
             await sendNotification({
                 user_id: Number(doctor_id),
@@ -789,9 +924,10 @@ router.post('/allocate/:id', async (req, res) => {
 });
 
 // -----------------------------------------------------------------------------
-// 9. Record Emergency Treatment Actions / Clinical Notes
+// 9. Record Emergency Treatment Actions / Clinical Notes (Admin, Doctor)
+//    - Enforces ownership if case is assigned to a specific doctor
 // -----------------------------------------------------------------------------
-router.post('/treatment/:id', async (req, res) => {
+router.post('/treatment/:id', requireRole('Admin', 'Doctor'), async (req, res) => {
     const { action_type = 'Observation', description, notes } = req.body;
 
     if (!description || !description.trim()) {
@@ -799,6 +935,19 @@ router.post('/treatment/:id', async (req, res) => {
     }
 
     try {
+        const [[ec]] = await mysqlPool.query('SELECT case_id FROM EMERGENCY_CASE WHERE case_id = ?', [req.params.id]);
+        if (!ec) return res.status(404).json({ error: 'Emergency case not found' });
+
+        if (req.session.user.role === 'Doctor') {
+            const [[activeDoc]] = await mysqlPool.query(
+                'SELECT doctor_id FROM EMERGENCY_DOCTOR_ASSIGNMENT WHERE case_id = ? AND is_active = TRUE LIMIT 1',
+                [req.params.id]
+            );
+            if (activeDoc && Number(activeDoc.doctor_id) !== Number(req.session.user.id)) {
+                return res.status(403).json({ error: 'Access denied: this emergency case is assigned to another doctor' });
+            }
+        }
+
         await mysqlPool.query(
             'INSERT INTO EMERGENCY_TREATMENT_LOG (case_id, doctor_id, action_type, description) VALUES (?, ?, ?, ?)',
             [req.params.id, req.session.user.id, action_type, description.trim()]
@@ -827,9 +976,11 @@ router.post('/treatment/:id', async (req, res) => {
 });
 
 // -----------------------------------------------------------------------------
-// 10. Inpatient Admission from Emergency
+// 10. Inpatient Admission from Emergency (Admin, Doctor)
+//     - Fixes PATIENT columns (dob, gender, blood_group, address, emergency_contact)
+//     - Requires target bed status === 'Available' in a transaction
 // -----------------------------------------------------------------------------
-router.post('/admit/:id', async (req, res) => {
+router.post('/admit/:id', requireRole('Admin', 'Doctor'), async (req, res) => {
     let { ward_name, bed_id, admitting_doctor_id, admission_notes } = req.body;
 
     if (!bed_id) {
@@ -846,37 +997,66 @@ router.post('/admit/:id', async (req, res) => {
             return res.status(404).json({ error: 'Emergency case not found' });
         }
 
-        // Auto-detect ward_name from bed if missing
-        if (!ward_name) {
-            const [[bInfo]] = await conn.query('SELECT ward_name FROM BED WHERE bed_id = ?', [bed_id]);
-            if (bInfo) ward_name = bInfo.ward_name;
-            else ward_name = 'General Ward';
+        const [[currentDocAssign]] = await conn.query(
+            'SELECT * FROM EMERGENCY_DOCTOR_ASSIGNMENT WHERE case_id = ? AND is_active = TRUE FOR UPDATE',
+            [req.params.id]
+        );
+        if (req.session.user.role === 'Doctor' && currentDocAssign && Number(currentDocAssign.doctor_id) !== Number(req.session.user.id)) {
+            await conn.rollback();
+            return res.status(403).json({ error: 'Access denied: this emergency case is assigned to another doctor' });
         }
+
+        const [[currentBedAssign]] = await conn.query(
+            'SELECT * FROM EMERGENCY_BED_ASSIGNMENT WHERE case_id = ? AND is_active = TRUE FOR UPDATE',
+            [req.params.id]
+        );
+
+        // Lock target bed and verify availability
+        const [[targetBed]] = await conn.query(
+            `SELECT b.*, w.ward_name
+             FROM BED b JOIN WARD w ON b.ward_id = w.ward_id
+             WHERE b.bed_id = ? FOR UPDATE`,
+            [bed_id]
+        );
+        if (!targetBed) {
+            await conn.rollback();
+            return res.status(404).json({ error: 'Selected inpatient bed does not exist' });
+        }
+        const sameBed = currentBedAssign && Number(currentBedAssign.bed_id) === Number(bed_id);
+        if (!sameBed && targetBed.status !== 'Available') {
+            await conn.rollback();
+            return res.status(409).json({
+                error: `Selected bed ${targetBed.bed_number} is not available (status: ${targetBed.status})`
+            });
+        }
+        ward_name = targetBed.ward_name;
 
         let patientId = ec.patient_id;
         if (!patientId) {
             const patientName = ec.temp_patient_name || ('Emergency Patient ' + ec.emg_number);
+            const tempHash = await bcrypt.hash('emg_temp_' + Date.now(), 10);
             const [uRes] = await conn.query(
-                "INSERT INTO `USER` (name, email, password_hash, role_id) VALUES (?, ?, 'temp_hash', (SELECT role_id FROM ROLE WHERE role_name='Patient'))",
-                [patientName, 'emg_' + Date.now() + '@medicare.in']
+                "INSERT INTO `USER` (name, email, password_hash, phone, role_id) VALUES (?, ?, ?, ?, (SELECT role_id FROM ROLE WHERE role_name='Patient'))",
+                [patientName, 'emg_' + Date.now() + '@medicare.in', tempHash, ec.contact_phone || '9999999999']
             );
             patientId = uRes.insertId;
+            const genderChar = ['M', 'F', 'O'].includes(ec.temp_patient_gender) ? ec.temp_patient_gender : 'O';
             await conn.query(
-                "INSERT INTO PATIENT (patient_id, date_of_birth, gender, contact_number, emergency_contact) VALUES (?, DATE_SUB(CURDATE(), INTERVAL ? YEAR), ?, ?, ?)",
-                [patientId, ec.temp_patient_age || 30, ec.temp_patient_gender || 'Other', ec.contact_phone || '9999999999', ec.emergency_contact || 'None']
+                `INSERT INTO PATIENT (patient_id, dob, gender, blood_group, address, emergency_contact)
+                 VALUES (?, DATE_SUB(CURDATE(), INTERVAL ? YEAR), ?, NULL, 'Emergency Admission', ?)`,
+                [patientId, ec.temp_patient_age || 30, genderChar, ec.emergency_contact || 'None']
             );
             await conn.query('UPDATE EMERGENCY_CASE SET patient_id = ? WHERE case_id = ?', [patientId, req.params.id]);
         }
 
-        // Determine a valid doctor_id (must exist in DOCTOR table due to FK)
+        // Determine a valid admitting_doctor_id
         let validDoctorId = admitting_doctor_id ? Number(admitting_doctor_id) : null;
         if (validDoctorId) {
             const [[docCheck]] = await conn.query('SELECT doctor_id FROM DOCTOR WHERE doctor_id = ?', [validDoctorId]);
             if (!docCheck) validDoctorId = null;
         }
-        if (!validDoctorId && ec.assigned_doctor_id) {
-            const [[docCheck]] = await conn.query('SELECT doctor_id FROM DOCTOR WHERE doctor_id = ?', [ec.assigned_doctor_id]);
-            if (docCheck) validDoctorId = ec.assigned_doctor_id;
+        if (!validDoctorId && currentDocAssign) {
+            validDoctorId = currentDocAssign.doctor_id;
         }
         if (!validDoctorId) {
             const [[firstDoc]] = await conn.query('SELECT doctor_id FROM DOCTOR LIMIT 1');
@@ -884,48 +1064,53 @@ router.post('/admit/:id', async (req, res) => {
         }
 
         // Release old emergency bed if different
-        if (ec.assigned_bed_id && ec.assigned_bed_id !== Number(bed_id)) {
-            await conn.query("UPDATE BED SET status='Cleaning', patient_id=NULL WHERE bed_id=?", [ec.assigned_bed_id]);
+        if (currentBedAssign) {
+            if (!sameBed) {
+                await conn.query("UPDATE BED SET status = 'Cleaning' WHERE bed_id = ?", [currentBedAssign.bed_id]);
+            }
+            await conn.query(
+                'UPDATE EMERGENCY_BED_ASSIGNMENT SET is_active = FALSE, released_at = NOW() WHERE assignment_id = ?',
+                [currentBedAssign.assignment_id]
+            );
         }
 
         // Occupy target inpatient bed
-        await conn.query("UPDATE BED SET status='Occupied', patient_id=? WHERE bed_id=?", [patientId, bed_id]);
+        await conn.query("UPDATE BED SET status = 'Occupied' WHERE bed_id = ?", [bed_id]);
 
-        // Insert admission record
-        await conn.query(
-            `INSERT INTO ADMISSION (patient_id, case_id, admitting_doctor_id, ward_name, bed_id, admitted_at, status)
-             VALUES (?, ?, ?, ?, ?, NOW(), 'Admitted')`,
-            [
-                patientId,
-                req.params.id,
-                validDoctorId,
-                ward_name,
-                bed_id
-            ]
+        // Insert ADMISSION record (3NF: ward derived via bed_id -> BED.ward_id)
+        const [admRes] = await conn.query(
+            `INSERT INTO ADMISSION (patient_id, case_id, admitting_doctor_id, bed_id, admitted_at, status)
+             VALUES (?, ?, ?, ?, NOW(), 'Admitted')`,
+            [patientId, req.params.id, validDoctorId, bed_id]
         );
 
         // Update emergency case status
         await conn.query(
-            "UPDATE EMERGENCY_CASE SET status = 'Admitted', assigned_bed_id = ? WHERE case_id = ?",
-            [bed_id, req.params.id]
+            "UPDATE EMERGENCY_CASE SET status = 'Admitted' WHERE case_id = ?",
+            [req.params.id]
         );
 
         // Treatment log
         const logUserId = validDoctorId || (req.session.user && req.session.user.id) || 1;
         await conn.query(
             'INSERT INTO EMERGENCY_TREATMENT_LOG (case_id, doctor_id, action_type, description) VALUES (?, ?, ?, ?)',
-            [req.params.id, logUserId, 'Admission', `Admitted to ${ward_name} (Bed ID ${bed_id}). Notes: ${admission_notes || 'None'}`]
+            [req.params.id, logUserId, 'Admission', `Admitted to ${ward_name} (Bed ${targetBed.bed_number}). Notes: ${admission_notes || 'None'}`]
         );
 
         await conn.commit();
 
         await sendNotification({
             role_name: 'Nurse',
-            message: `Emergency patient ${ec.emg_number} admitted to ${ward_name}.`,
+            message: `Emergency patient ${ec.emg_number} admitted to ${ward_name} (${targetBed.bed_number}).`,
             event_type: 'patient_admitted'
         });
 
-        res.json({ message: 'Patient admitted to inpatient ward successfully' });
+        res.json({
+            message: 'Patient admitted to inpatient ward successfully',
+            admission_id: admRes.insertId,
+            ward_name,
+            bed_id: Number(bed_id)
+        });
     } catch (err) {
         await conn.rollback();
         console.error('Admission error:', err);
@@ -936,9 +1121,9 @@ router.post('/admit/:id', async (req, res) => {
 });
 
 // -----------------------------------------------------------------------------
-// 11. Emergency Discharge with Summary & Bed Release
+// 11. Emergency Discharge with Summary & Bed Release (Admin, Doctor)
 // -----------------------------------------------------------------------------
-router.post('/discharge/:id', async (req, res) => {
+router.post('/discharge/:id', requireRole('Admin', 'Doctor'), async (req, res) => {
     const { discharge_summary, emergency_fee = 500 } = req.body;
 
     if (!discharge_summary || !discharge_summary.trim()) {
@@ -949,15 +1134,40 @@ router.post('/discharge/:id', async (req, res) => {
     try {
         await conn.beginTransaction();
 
-        const [[ec]] = await conn.query('SELECT * FROM EMERGENCY_CASE WHERE case_id = ?', [req.params.id]);
+        const [[ec]] = await conn.query('SELECT * FROM EMERGENCY_CASE WHERE case_id = ? FOR UPDATE', [req.params.id]);
         if (!ec) {
             await conn.rollback();
             return res.status(404).json({ error: 'Emergency case not found' });
         }
 
-        // Release bed
-        if (ec.assigned_bed_id) {
-            await conn.query("UPDATE BED SET status='Cleaning', patient_id=NULL WHERE bed_id=?", [ec.assigned_bed_id]);
+        const [[currentDocAssign]] = await conn.query(
+            'SELECT * FROM EMERGENCY_DOCTOR_ASSIGNMENT WHERE case_id = ? AND is_active = TRUE FOR UPDATE',
+            [req.params.id]
+        );
+        if (req.session.user.role === 'Doctor' && currentDocAssign && Number(currentDocAssign.doctor_id) !== Number(req.session.user.id)) {
+            await conn.rollback();
+            return res.status(403).json({ error: 'Access denied: this emergency case is assigned to another doctor' });
+        }
+
+        // Release active emergency bed assignment to Cleaning
+        const [[currentBedAssign]] = await conn.query(
+            'SELECT * FROM EMERGENCY_BED_ASSIGNMENT WHERE case_id = ? AND is_active = TRUE FOR UPDATE',
+            [req.params.id]
+        );
+        if (currentBedAssign) {
+            await conn.query("UPDATE BED SET status = 'Cleaning' WHERE bed_id = ?", [currentBedAssign.bed_id]);
+            await conn.query(
+                'UPDATE EMERGENCY_BED_ASSIGNMENT SET is_active = FALSE, released_at = NOW() WHERE assignment_id = ?',
+                [currentBedAssign.assignment_id]
+            );
+        }
+
+        // Close active doctor assignment
+        if (currentDocAssign) {
+            await conn.query(
+                'UPDATE EMERGENCY_DOCTOR_ASSIGNMENT SET is_active = FALSE, unassigned_at = NOW() WHERE assignment_id = ?',
+                [currentDocAssign.assignment_id]
+            );
         }
 
         // Update emergency case
@@ -970,26 +1180,29 @@ router.post('/discharge/:id', async (req, res) => {
             [discharge_summary.trim(), req.params.id]
         );
 
-        // Auto-generate Bill if patient is registered
+        // Auto-generate Bill if patient is registered (3NF: BILL has no total_amount/payment_status columns)
         if (ec.patient_id) {
-            // Find existing unpaid bill or create new bill
             const [existingBills] = await conn.query(
-                "SELECT bill_id FROM BILL WHERE patient_id = ? AND payment_status = 'Unpaid' ORDER BY bill_date DESC LIMIT 1",
+                `SELECT b.bill_id
+                 FROM BILL b
+                 JOIN vw_bill_summary vbs ON b.bill_id = vbs.bill_id
+                 WHERE b.patient_id = ? AND vbs.payment_status <> 'Paid'
+                 ORDER BY b.bill_date DESC LIMIT 1`,
                 [ec.patient_id]
             );
 
             let billId;
             if (existingBills.length) {
                 billId = existingBills[0].bill_id;
+                await conn.query('UPDATE BILL SET case_id = COALESCE(case_id, ?) WHERE bill_id = ?', [ec.case_id, billId]);
             } else {
                 const [billResult] = await conn.query(
-                    'INSERT INTO BILL (patient_id, total_amount, payment_status, bill_date) VALUES (?, ?, ?, NOW())',
-                    [ec.patient_id, 0.00, 'Unpaid']
+                    'INSERT INTO BILL (patient_id, case_id, bill_date, generated_by) VALUES (?, ?, NOW(), ?)',
+                    [ec.patient_id, ec.case_id, req.session.user.id]
                 );
                 billId = billResult.insertId;
             }
 
-            // Insert emergency bill item
             await conn.query(
                 'INSERT INTO BILL_ITEM (bill_id, item_type, description, amount) VALUES (?, ?, ?, ?)',
                 [billId, 'Emergency', `Emergency Ward Care & Triage (${ec.emg_number})`, Number(emergency_fee) || 500.00]
@@ -1021,9 +1234,9 @@ router.post('/discharge/:id', async (req, res) => {
 });
 
 // -----------------------------------------------------------------------------
-// 12. Supporting Rosters: Available Doctors & Beds
+// 12. Supporting Rosters: Available Doctors & Beds (Admin, Doctor, Nurse, Receptionist)
 // -----------------------------------------------------------------------------
-router.get('/doctors', async (req, res) => {
+router.get('/doctors', requireRole('Admin', 'Doctor', 'Nurse', 'Receptionist'), async (req, res) => {
     try {
         const [rows] = await mysqlPool.query(
             `SELECT 
@@ -1033,8 +1246,28 @@ router.get('/doctors', async (req, res) => {
                 d.department_id,
                 dept.department_name,
                 COALESCE(ds.shift_type, 'Not on shift') AS shift_type,
-                COALESCE(ds.is_on_duty, FALSE) AS is_on_duty,
-                (SELECT COUNT(*) FROM EMERGENCY_CASE ec WHERE ec.assigned_doctor_id = d.doctor_id AND ec.status IN ('Assigned', 'In Treatment')) AS active_cases
+                CASE
+                    WHEN ds.shift_id IS NOT NULL
+                         AND ds.is_on_duty = TRUE
+                         AND (
+                             (ds.start_time <= ds.end_time AND CURTIME() BETWEEN ds.start_time AND ds.end_time)
+                             OR (ds.start_time > ds.end_time AND (CURTIME() >= ds.start_time OR CURTIME() <= ds.end_time))
+                         )
+                         AND NOT EXISTS (
+                             SELECT 1 FROM DOCTOR_LEAVE dl
+                             WHERE dl.doctor_id = d.doctor_id
+                               AND dl.status = 'Approved'
+                               AND CURDATE() BETWEEN dl.start_date AND dl.end_date
+                         )
+                    THEN TRUE
+                    ELSE FALSE
+                END AS is_on_duty,
+                (SELECT COUNT(*)
+                 FROM EMERGENCY_DOCTOR_ASSIGNMENT eda
+                 JOIN EMERGENCY_CASE ec ON eda.case_id = ec.case_id
+                 WHERE eda.doctor_id = d.doctor_id
+                   AND eda.is_active = TRUE
+                   AND ec.status IN ('Assigned', 'In Treatment')) AS active_cases
              FROM DOCTOR d
              JOIN \`USER\` u ON d.doctor_id = u.user_id
              JOIN DEPARTMENT dept ON d.department_id = dept.department_id
@@ -1048,22 +1281,21 @@ router.get('/doctors', async (req, res) => {
     }
 });
 
-router.get('/beds', async (req, res) => {
+router.get('/beds', requireRole('Admin', 'Doctor', 'Nurse', 'Receptionist'), async (req, res) => {
     try {
         const [rows] = await mysqlPool.query(
-            `SELECT b.bed_id, b.ward_name, b.bed_number, b.status, b.patient_id,
+            `SELECT v.bed_id, v.ward_name, v.bed_number, v.status, v.patient_id,
                     u.name AS patient_name,
-                    ec.emg_number
-             FROM BED b
-             LEFT JOIN PATIENT p ON b.patient_id = p.patient_id
+                    v.emg_number
+             FROM vw_bed_details v
+             LEFT JOIN PATIENT p ON v.patient_id = p.patient_id
              LEFT JOIN \`USER\` u ON p.patient_id = u.user_id
-             LEFT JOIN EMERGENCY_CASE ec ON ec.assigned_bed_id = b.bed_id AND ec.status NOT IN ('Discharged', 'Transferred')
              ORDER BY 
-                CASE WHEN b.ward_name = 'Emergency Ward' THEN 1 
-                     WHEN b.ward_name = 'ICU' THEN 2 
-                     WHEN b.ward_name = 'General Ward' THEN 3
+                CASE WHEN v.ward_name = 'Emergency Ward' THEN 1 
+                     WHEN v.ward_name = 'ICU' THEN 2 
+                     WHEN v.ward_name = 'General Ward' THEN 3
                      ELSE 4 END,
-                b.bed_number`
+                v.bed_number`
         );
         res.json(rows);
     } catch (err) {
@@ -1072,4 +1304,3 @@ router.get('/beds', async (req, res) => {
 });
 
 module.exports = router;
-

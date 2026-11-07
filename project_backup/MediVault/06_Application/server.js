@@ -6,6 +6,11 @@ const session = require('express-session');
 const path = require('path');
 const { connectMongo } = require('./config/db');
 
+const SESSION_SECRET = process.env.SESSION_SECRET;
+if (!SESSION_SECRET || SESSION_SECRET === 'change-this-in-production' || SESSION_SECRET === 'medivault-dev-secret-change-in-production') {
+    throw new Error('SESSION_SECRET environment variable must be set to a real secret value before starting the server.');
+}
+
 const app = express();
 app.use(express.json());
 // Browser API origin is supplied by environment, not baked into any page.
@@ -15,10 +20,14 @@ app.get('/runtime-config.js', (req, res) => res.type('application/javascript').s
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.use(session({
-    secret: process.env.SESSION_SECRET || 'medivault-dev-secret-change-in-production',
+    secret: SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
-    cookie: { maxAge: 1000 * 60 * 60 * 8 } // 8-hour shift-length session
+    cookie: {
+        httpOnly: true,
+        sameSite: 'lax',
+        maxAge: 1000 * 60 * 60 * 8 // 8-hour shift-length session
+    }
 }));
 
 app.use('/api/auth', require('./routes/auth'));
@@ -47,7 +56,11 @@ async function start() {
     } catch (err) {
         console.warn('MongoDB not reachable at startup -- notification/lab-raw routes will degrade gracefully:', err.message);
     }
-    app.listen(PORT, () => console.log(`MediCare server listening on :${PORT}`));
+    return app.listen(PORT, () => console.log(`MediCare server listening on :${PORT}`));
 }
 
-start();
+if (require.main === module) {
+    start();
+}
+
+module.exports = { app, start };

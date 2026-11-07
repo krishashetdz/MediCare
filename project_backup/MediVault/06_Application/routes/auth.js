@@ -5,16 +5,18 @@ const { mysqlPool } = require('../config/db');
 const router = express.Router();
 
 // One login page, one endpoint, for every role -- ROLE lookup decides where
-// the frontend redirects to next. This is the "single login page -> session
-// -> role check -> redirect to correct dashboard" flow from the spec.
+// the frontend redirects to next. Passwords must be verified against bcrypt hashes.
 router.post('/login', async (req, res) => {
     const { email, password } = req.body;
+    if (!email || !password || typeof email !== 'string' || typeof password !== 'string') {
+        return res.status(400).json({ error: 'Email and password are required' });
+    }
     try {
         const [rows] = await mysqlPool.query(
-            `SELECT u.user_id, u.name, u.password_hash, r.role_name
+            `SELECT u.user_id, u.name, u.email, u.password_hash, r.role_name
              FROM \`USER\` u JOIN ROLE r ON u.role_id = r.role_id
              WHERE u.email = ? AND u.is_active = TRUE`,
-            [email]
+            [email.trim()]
         );
         if (rows.length === 0) {
             return res.status(401).json({ error: 'Invalid email or password' });
@@ -29,19 +31,10 @@ router.post('/login', async (req, res) => {
             match = false;
         }
         if (!match) {
-            if (password === user.password_hash ||
-                password === user.password_hash.replace(/^hash_/, '') ||
-                password === 'password' ||
-                password === 'admin123') {
-                match = true;
-            }
-        }
-        if (!match) {
             return res.status(401).json({ error: 'Invalid email or password' });
         }
 
         // For STAFF logins, also fetch the sub-role (Nurse/Lab Tech/Pharmacist/Receptionist)
-        // so the frontend can render the right one of the 4 staff-portal views.
         let staffType = null;
         if (user.role_name !== 'Admin' && user.role_name !== 'Doctor' && user.role_name !== 'Patient') {
             const [staffRows] = await mysqlPool.query(
@@ -50,14 +43,22 @@ router.post('/login', async (req, res) => {
             staffType = staffRows[0] ? staffRows[0].staff_type : null;
         }
 
-        req.session.user = { id: user.user_id, name: user.name, email: user.email, role: user.role_name, staffType };
+        req.session.user = {
+            id: user.user_id,
+            name: user.name,
+            email: user.email,
+            role: user.role_name,
+            staffType
+        };
 
         const redirectMap = {
             Admin: '/admin-dashboard.html',
             Doctor: '/doctor-dashboard.html',
             Patient: '/patient-portal.html',
-            Nurse: '/staff-portal.html', 'Lab Technician': '/staff-portal.html',
-            Pharmacist: '/staff-portal.html', Receptionist: '/staff-portal.html'
+            Nurse: '/staff-portal.html',
+            'Lab Technician': '/staff-portal.html',
+            Pharmacist: '/staff-portal.html',
+            Receptionist: '/staff-portal.html'
         };
 
         res.json({

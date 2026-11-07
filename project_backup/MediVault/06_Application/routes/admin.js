@@ -1,8 +1,238 @@
 const express = require('express');
-const { mysqlPool } = require('../config/db');
+const bcrypt = require('bcryptjs');
+const { mysqlPool, getMongo } = require('../config/db');
 const { requireRole } = require('../middleware/auth');
 
 const router = express.Router();
+
+// Read-only cross-role helper routes (needed by emergency.html & staff-portal.html modals)
+router.get('/doctors', requireRole('Admin', 'Doctor', 'Nurse', 'Receptionist'), async (req, res) => {
+    const [rows] = await mysqlPool.query(
+        `SELECT doc.doctor_id, u.name, u.email, dep.department_name, doc.specialization, doc.consultation_fee
+         FROM DOCTOR doc JOIN \`USER\` u ON doc.doctor_id = u.user_id
+         JOIN DEPARTMENT dep ON doc.department_id = dep.department_id`
+    );
+    res.json(rows);
+});
+
+router.get('/patients', requireRole('Admin', 'Doctor', 'Nurse', 'Receptionist'), async (req, res) => {
+    try {
+        const q = req.query.q || '';
+        if (q.length < 2) return res.json([]);
+        const [rows] = await mysqlPool.query(
+            `SELECT p.patient_id, u.name, u.email, u.phone, p.blood_group
+             FROM PATIENT p JOIN \`USER\` u ON p.patient_id = u.user_id
+             WHERE u.name LIKE ? OR u.email LIKE ? OR u.phone LIKE ?
+             LIMIT 20`,
+            ['%' + q + '%', '%' + q + '%', '%' + q + '%']
+        );
+        res.json(rows);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to search patients' });
+    }
+});
+
+// Bed management (shared read for Admin, Doctor, Nurse, Receptionist)
+router.get('/beds', requireRole('Admin', 'Doctor', 'Nurse', 'Receptionist'), async (req, res) => {
+    try {
+        let sql = `SELECT v.bed_id, v.ward_id, v.ward_name, v.bed_number, v.status, v.patient_id,
+                   u.name AS patient_name, u.phone AS patient_phone, p.blood_group AS patient_blood_group
+                   FROM vw_bed_details v
+                   LEFT JOIN PATIENT p ON v.patient_id = p.patient_id
+                   LEFT JOIN \`USER\` u ON p.patient_id = u.user_id`;
+        const params = [];
+        if (req.query.ward) {
+            sql += ' WHERE v.ward_name = ?';
+            params.push(req.query.ward);
+        }
+        sql += ' ORDER BY v.ward_name, v.bed_number';
+        const [rows] = await mysqlPool.query(sql, params);
+        res.json(rows);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch beds' });
+    }
+});
+
+// All remaining /api/admin routes require Admin role (or Admin/Nurse for bed turnover)
+router.get('/beds/:id', requireRole('Admin', 'Nurse'), async (req, res) => {
+    try {
+        const [rows] = await mysqlPool.query(
+            `SELECT v.bed_id, v.ward_id, v.ward_name, v.bed_number, v.status, v.patient_id,
+             u.name AS patient_name, u.phone AS patient_phone, p.blood_group AS patient_blood_group
+             FROM vw_bed_details v
+             LEFT JOIN PATIENT p ON v.patient_id = p.patient_id
+             LEFT JOIN \`USER\` u ON p.patient_id = u.user_id
+             WHERE v.bed_id = ?`,
+            [req.params.id]
+        );
+        if (!rows.length) return res.status(404).json({ error: 'Bed not found' });
+        res.json(rows[0]);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch bed' });
+    }
+});
+
+router.patch('/beds/:id', requireRole('Admin', 'Nurse'), async (req, res) => {
+    const conn = await mysqlPool.getConnection();
+    try {
+        await conn.beginTransaction();
+        const { patient_id, status, admitting_doctor_id, discharge_summary } = req.body;
+
+        // Concurrency locking: lock the BED row first
+        const [beds] = await conn.query(
+            `SELECT b.*, w.ward_name, w.daily_rate
+             FROM BED b JOIN WARD w ON b.ward_id = w.ward_id
+             WHERE b.bed_id = ? FOR UPDATE`,
+            [req.params.id]
+        );
+        if (!beds.length) {
+            await conn.rollback();
+            return res.status(404).json({ error: 'Bed not found' });
+        }
+        const currentBed = beds[0];
+
+        // Find current occupant from active ADMISSION or active EMERGENCY_BED_ASSIGNMENT
+        const [activeAdm] = await conn.query(
+            "SELECT * FROM ADMISSION WHERE bed_id = ? AND status = 'Admitted' FOR UPDATE",
+            [req.params.id]
+        );
+        const [activeEmg] = await conn.query(
+            "SELECT eba.*, ec.patient_id FROM EMERGENCY_BED_ASSIGNMENT eba JOIN EMERGENCY_CASE ec ON eba.case_id = ec.case_id WHERE eba.bed_id = ? AND eba.is_active = TRUE FOR UPDATE",
+            [req.params.id]
+        );
+        const currentPatientId = (activeAdm[0] && activeAdm[0].patient_id) || (activeEmg[0] && activeEmg[0].patient_id) || null;
+
+        // Concurrency / availability check when assigning a bed to Occupied
+        if (status === 'Occupied') {
+            if (currentBed.status !== 'Available' && (!currentPatientId || Number(currentPatientId) !== Number(patient_id))) {
+                await conn.rollback();
+                return res.status(409).json({
+                    error: `Concurrency conflict: Bed ${currentBed.bed_number} is currently ${currentBed.status}`
+                });
+            }
+        }
+
+        let newStatus = status || (patient_id ? 'Occupied' : 'Available');
+        let newPatientId = null;
+
+        if (newStatus === 'Occupied') {
+            newPatientId = patient_id || currentPatientId;
+            if (!newPatientId) {
+                await conn.rollback();
+                return res.status(400).json({ error: 'patient_id is required when marking a bed Occupied' });
+            }
+
+            await conn.query('UPDATE BED SET status = ? WHERE bed_id = ?', ['Occupied', req.params.id]);
+
+            if (!activeAdm.length) {
+                let docId = admitting_doctor_id ? Number(admitting_doctor_id) : null;
+                if (!docId) {
+                    const [[firstDoc]] = await conn.query('SELECT doctor_id FROM DOCTOR ORDER BY doctor_id LIMIT 1');
+                    docId = firstDoc ? firstDoc.doctor_id : null;
+                }
+                await conn.query(
+                    `INSERT INTO ADMISSION (patient_id, admitting_doctor_id, bed_id, admitted_at, status)
+                     VALUES (?, ?, ?, NOW(), 'Admitted')`,
+                    [newPatientId, docId, req.params.id]
+                );
+            }
+        } else if (newStatus === 'Cleaning' || newStatus === 'Available' || newStatus === 'Maintenance' || newStatus === 'Reserved') {
+            // If bed was Occupied, discharging the patient closes active ADMISSION, finalizes the bill,
+            // and transitions the bed through Cleaning (or directly to Available after cleaning).
+            if (activeAdm.length) {
+                const adm = activeAdm[0];
+                await conn.query(
+                    `UPDATE ADMISSION
+                     SET discharged_at = NOW(),
+                         discharge_summary = COALESCE(?, discharge_summary, 'Discharged from inpatient ward'),
+                         status = 'Discharged'
+                     WHERE admission_id = ?`,
+                    [discharge_summary || null, adm.admission_id]
+                );
+
+                // Finalize / create bill for the inpatient stay
+                const days = Math.max(1, Math.ceil((Date.now() - new Date(adm.admitted_at).getTime()) / (1000 * 60 * 60 * 24)));
+                const roomCharge = Number((days * Number(currentBed.daily_rate || 1000)).toFixed(2));
+
+                const [existingBills] = await conn.query(
+                    `SELECT b.bill_id
+                     FROM BILL b
+                     JOIN vw_bill_summary vbs ON b.bill_id = vbs.bill_id
+                     WHERE b.patient_id = ? AND vbs.payment_status <> 'Paid'
+                     ORDER BY b.bill_date DESC LIMIT 1`,
+                    [adm.patient_id]
+                );
+
+                let billId;
+                if (existingBills.length) {
+                    billId = existingBills[0].bill_id;
+                    await conn.query('UPDATE BILL SET admission_id = COALESCE(admission_id, ?) WHERE bill_id = ?', [adm.admission_id, billId]);
+                } else {
+                    const [billRes] = await conn.query(
+                        'INSERT INTO BILL (patient_id, admission_id, bill_date, generated_by) VALUES (?, ?, NOW(), ?)',
+                        [adm.patient_id, adm.admission_id, req.session.user.id]
+                    );
+                    billId = billRes.insertId;
+                }
+
+                await conn.query(
+                    'INSERT INTO BILL_ITEM (bill_id, item_type, description, amount) VALUES (?, ?, ?, ?)',
+                    [billId, 'Admission', `Inpatient stay - ${currentBed.ward_name} (${currentBed.bed_number}, ${days} day(s))`, roomCharge]
+                );
+
+                // When discharging an occupied bed, release to Cleaning first unless explicitly completing cleaning
+                if (currentBed.status === 'Occupied' && !req.body.skip_cleaning) {
+                    newStatus = 'Cleaning';
+                }
+            }
+
+            if (activeEmg.length) {
+                await conn.query(
+                    'UPDATE EMERGENCY_BED_ASSIGNMENT SET is_active = FALSE, released_at = NOW() WHERE bed_id = ? AND is_active = TRUE',
+                    [req.params.id]
+                );
+            }
+
+            await conn.query('UPDATE BED SET status = ? WHERE bed_id = ?', [newStatus, req.params.id]);
+        }
+
+        await conn.commit();
+
+        // Audit log in MongoDB
+        try {
+            const mongo = getMongo();
+            await mongo.collection('audit_log').insertOne({
+                event: 'bed_allocation_updated',
+                bed_id: Number(req.params.id),
+                bed_number: currentBed.bed_number,
+                ward_name: currentBed.ward_name,
+                previous_status: currentBed.status,
+                previous_patient_id: currentPatientId,
+                new_status: newStatus,
+                new_patient_id: newPatientId,
+                updated_by: req.session.user.id,
+                updated_at: new Date()
+            });
+        } catch (mongoErr) {
+            console.warn('MongoDB audit_log write failed (non-fatal):', mongoErr.message);
+        }
+
+        res.json({
+            message: 'Bed updated successfully',
+            bed_id: Number(req.params.id),
+            status: newStatus,
+            patient_id: newPatientId
+        });
+    } catch (err) {
+        await conn.rollback();
+        console.error('Error updating bed:', err);
+        res.status(500).json({ error: 'Failed to update bed' });
+    } finally {
+        conn.release();
+    }
+});
+
+// Admin-only routes below
 router.use(requireRole('Admin'));
 
 // Stat cards -- pulls straight from the Phase 3/4 dashboard queries and views.
@@ -13,7 +243,7 @@ router.get('/dashboard', async (req, res) => {
         const [[appts]] = await mysqlPool.query('SELECT COUNT(*) AS total_appointments FROM APPOINTMENT');
         const [[beds]] = await mysqlPool.query("SELECT COUNT(*) AS available_beds FROM BED WHERE status='Available'");
         const [[pendingLab]] = await mysqlPool.query("SELECT COUNT(*) AS pending_lab_reports FROM LAB_REQUEST WHERE status='Pending'");
-        const [[lowStock]] = await mysqlPool.query('SELECT COUNT(*) AS low_stock_medicines FROM MEDICINE WHERE stock_qty < 20');
+        const [[lowStock]] = await mysqlPool.query('SELECT COUNT(*) AS low_stock_medicines FROM vw_medicine_inventory WHERE stock_qty < 20');
         const [revenue] = await mysqlPool.query('SELECT * FROM vw_monthly_revenue');
         const [occupancy] = await mysqlPool.query('SELECT * FROM vw_bed_occupancy');
 
@@ -27,32 +257,26 @@ router.get('/dashboard', async (req, res) => {
     }
 });
 
-// ---- CRUD template: Doctors. Departments/Beds/Pharmacy/Billing/Ambulance/
-// Blood Bank management all follow this exact same list/create/update/delete
-// shape against their own table -- shown once here rather than 6x repeated. ----
-
-router.get('/doctors', async (req, res) => {
-    const [rows] = await mysqlPool.query(
-        `SELECT doc.doctor_id, u.name, u.email, dep.department_name, doc.specialization, doc.consultation_fee
-         FROM DOCTOR doc JOIN \`USER\` u ON doc.doctor_id = u.user_id
-         JOIN DEPARTMENT dep ON doc.department_id = dep.department_id`
-    );
-    res.json(rows);
-});
-
 router.post('/doctors', async (req, res) => {
-    const { name, email, password_hash, department_id, specialization, qualification, consultation_fee } = req.body;
+    const { name, email, password, password_hash, department_id, specialization, qualification, consultation_fee } = req.body;
+    const rawPassword = password || password_hash;
+    if (!name || !email || !rawPassword || !department_id) {
+        return res.status(400).json({ error: 'Name, email, password, and department_id are required' });
+    }
     const conn = await mysqlPool.getConnection();
     try {
         await conn.beginTransaction();
+        const hashedPassword = String(rawPassword).startsWith('$2')
+            ? String(rawPassword)
+            : await bcrypt.hash(String(rawPassword), 10);
         const [roleRow] = await conn.query("SELECT role_id FROM ROLE WHERE role_name='Doctor'");
         const [userResult] = await conn.query(
             'INSERT INTO `USER` (name, email, password_hash, role_id) VALUES (?, ?, ?, ?)',
-            [name, email, password_hash, roleRow[0].role_id]
+            [name.trim(), email.trim(), hashedPassword, roleRow[0].role_id]
         );
         await conn.query(
             'INSERT INTO DOCTOR (doctor_id, department_id, specialization, qualification, consultation_fee) VALUES (?, ?, ?, ?, ?)',
-            [userResult.insertId, department_id, specialization, qualification, consultation_fee]
+            [userResult.insertId, department_id, specialization || null, qualification || null, consultation_fee || 500]
         );
         await conn.commit();
         res.status(201).json({ doctor_id: userResult.insertId });
@@ -76,11 +300,9 @@ router.put('/doctors/:id', async (req, res) => {
 
 router.delete('/doctors/:id', async (req, res) => {
     try {
-        // deleting the USER row cascades to DOCTOR (ON DELETE CASCADE, Phase 2)
         await mysqlPool.query('DELETE FROM `USER` WHERE user_id=?', [req.params.id]);
         res.json({ message: 'Doctor removed' });
     } catch (err) {
-        // e.g. FK RESTRICT from APPOINTMENT/PRESCRIPTION/etc if this doctor has history
         res.status(409).json({ error: 'Cannot delete: this doctor has appointment/records history' });
     }
 });
@@ -100,7 +322,7 @@ router.patch('/notifications/mark-all-read', async (req, res) => {
     res.json({ message: 'All notifications marked read' });
 });
 
-// Emergency cases count -- pulls real active emergency cases from EMERGENCY_CASE
+// Emergency cases count
 router.get('/emergencies/count', async (req, res) => {
     try {
         const [[row]] = await mysqlPool.query(
@@ -124,144 +346,14 @@ router.get('/ambulances/available', async (req, res) => {
     }
 });
 
-// Patient search for bed assignment
-router.get('/patients', requireRole('Admin'), async (req, res) => {
-    try {
-        const q = req.query.q || '';
-        if (q.length < 2) return res.json([]);
-        const [rows] = await mysqlPool.query(
-            `SELECT p.patient_id, u.name, u.email, u.phone, p.blood_group
-             FROM PATIENT p JOIN \`USER\` u ON p.patient_id = u.user_id
-             WHERE u.name LIKE ? OR u.email LIKE ?
-             LIMIT 20`,
-            ['%' + q + '%', '%' + q + '%']
-        );
-        res.json(rows);
-    } catch (err) {
-        res.status(500).json({ error: 'Failed to search patients' });
-    }
-});
-
-// Bed management
-router.get('/beds', requireRole('Admin', 'Doctor', 'Nurse', 'Receptionist', 'Staff'), async (req, res) => {
-    try {
-        let sql = `SELECT b.bed_id, b.ward_name, b.bed_number, b.status,
-                   u.name AS patient_name, u.phone AS patient_phone, p.blood_group AS patient_blood_group
-                   FROM BED b
-                   LEFT JOIN PATIENT p ON b.patient_id = p.patient_id
-                   LEFT JOIN \`USER\` u ON p.patient_id = u.user_id`;
-        const params = [];
-        if (req.query.ward) {
-            sql += ' WHERE b.ward_name = ?';
-            params.push(req.query.ward);
-        }
-        sql += ' ORDER BY b.ward_name, b.bed_number';
-        const [rows] = await mysqlPool.query(sql, params);
-        res.json(rows);
-    } catch (err) {
-        res.status(500).json({ error: 'Failed to fetch beds' });
-    }
-});
-
-router.get('/beds/:id', requireRole('Admin'), async (req, res) => {
-    try {
-        const [rows] = await mysqlPool.query(
-            `SELECT b.bed_id, b.ward_name, b.bed_number, b.status,
-             u.name AS patient_name, u.phone AS patient_phone, p.blood_group AS patient_blood_group
-             FROM BED b
-             LEFT JOIN PATIENT p ON b.patient_id = p.patient_id
-             LEFT JOIN \`USER\` u ON p.patient_id = u.user_id
-             WHERE b.bed_id = ?`,
-            [req.params.id]
-        );
-        if (!rows.length) return res.status(404).json({ error: 'Bed not found' });
-        res.json(rows[0]);
-    } catch (err) {
-        res.status(500).json({ error: 'Failed to fetch bed' });
-    }
-});
-
-router.patch('/beds/:id', requireRole('Admin'), async (req, res) => {
-    const conn = await mysqlPool.getConnection();
-    try {
-        await conn.beginTransaction();
-        const { patient_id, status } = req.body;
-
-        // Concurrency locking: Acquire row lock with SELECT ... FOR UPDATE (Bug 5 fix)
-        const [beds] = await conn.query('SELECT * FROM BED WHERE bed_id = ? FOR UPDATE', [req.params.id]);
-        if (!beds.length) {
-            await conn.rollback();
-            conn.release();
-            return res.status(404).json({ error: 'Bed not found' });
-        }
-        const currentBed = beds[0];
-
-        // Concurrency check: If attempting to assign an already occupied bed to a different patient
-        if (status === 'Occupied' && currentBed.status === 'Occupied' && currentBed.patient_id && Number(currentBed.patient_id) !== Number(patient_id)) {
-            await conn.rollback();
-            conn.release();
-            return res.status(409).json({ error: `Concurrency conflict: Bed ${currentBed.bed_number} is already occupied by patient #${currentBed.patient_id}` });
-        }
-
-        const newPatientId = (status === 'Available' || status === 'Cleaning' || status === 'Maintenance') ? null : (patient_id || currentBed.patient_id);
-        const newStatus = status || (newPatientId ? 'Occupied' : 'Available');
-
-        await conn.query(
-            'UPDATE BED SET patient_id = ?, status = ? WHERE bed_id = ?',
-            [newPatientId, newStatus, req.params.id]
-        );
-
-        // Record admission if being occupied
-        if (newStatus === 'Occupied' && newPatientId && currentBed.status !== 'Occupied') {
-            await conn.query(
-                'INSERT INTO ADMISSION (patient_id, bed_id, admission_date, status) VALUES (?, ?, NOW(), "Active")',
-                [newPatientId, req.params.id]
-            );
-        } else if (newStatus === 'Available' || newStatus === 'Cleaning') {
-            // Discharge active admission if any
-            await conn.query(
-                'UPDATE ADMISSION SET discharge_date = NOW(), status = "Discharged" WHERE bed_id = ? AND status = "Active"',
-                [req.params.id]
-            );
-        }
-
-        await conn.commit();
-        conn.release();
-
-        // Audit log in MongoDB
-        try {
-            const mongo = getMongo();
-            await mongo.collection('audit_log').insertOne({
-                event: 'bed_allocation_updated',
-                bed_id: Number(req.params.id),
-                bed_number: currentBed.bed_number,
-                ward_name: currentBed.ward_name,
-                previous_status: currentBed.status,
-                previous_patient_id: currentBed.patient_id,
-                new_status: newStatus,
-                new_patient_id: newPatientId,
-                updated_by: req.session.user.id,
-                updated_at: new Date()
-            });
-        } catch (mongoErr) {
-            console.warn('MongoDB audit_log write failed (non-fatal):', mongoErr.message);
-        }
-
-        res.json({ message: 'Bed updated successfully', bed_id: req.params.id, status: newStatus, patient_id: newPatientId });
-    } catch (err) {
-        await conn.rollback();
-        conn.release();
-        console.error('Error updating bed:', err);
-        res.status(500).json({ error: 'Failed to update bed' });
-    }
-});
-
-// Appointments grouped by department (for bar chart)
+// Appointments grouped by department (3NF: derived via DOCTOR -> DEPARTMENT)
 router.get('/appointments/by-department', async (req, res) => {
     try {
         const [rows] = await mysqlPool.query(
             `SELECT d.department_name, COUNT(a.appointment_id) as count
-             FROM DEPARTMENT d LEFT JOIN APPOINTMENT a ON d.department_id = a.department_id
+             FROM DEPARTMENT d
+             LEFT JOIN DOCTOR doc ON d.department_id = doc.department_id
+             LEFT JOIN APPOINTMENT a ON doc.doctor_id = a.doctor_id
              GROUP BY d.department_id, d.department_name
              ORDER BY count DESC`
         );
@@ -272,7 +364,7 @@ router.get('/appointments/by-department', async (req, res) => {
     }
 });
 
-// Recent appointments list (limit param, defaults to 10; optional status filter)
+// Recent appointments list
 router.get('/appointments', async (req, res) => {
     try {
         const limit = parseInt(req.query.limit) || 10;
@@ -282,7 +374,7 @@ router.get('/appointments', async (req, res) => {
                  FROM APPOINTMENT a
                  JOIN PATIENT p ON a.patient_id = p.patient_id JOIN \`USER\` up ON p.patient_id = up.user_id
                  JOIN DOCTOR doc ON a.doctor_id = doc.doctor_id JOIN \`USER\` ud ON doc.doctor_id = ud.user_id
-                 JOIN DEPARTMENT dep ON a.department_id = dep.department_id`;
+                 JOIN DEPARTMENT dep ON doc.department_id = dep.department_id`;
         const params = [];
         if (status) { sql += ' WHERE a.status = ?'; params.push(status); }
         sql += ' ORDER BY a.created_at DESC LIMIT ?';
@@ -295,41 +387,15 @@ router.get('/appointments', async (req, res) => {
     }
 });
 
-// Blood bank inventory
-router.get('/blood-bank', requireRole('Admin'), async (req, res) => {
-    const [rows] = await mysqlPool.query(
-        'SELECT blood_id, blood_group, units_available, last_updated FROM BLOOD_BANK ORDER BY blood_group'
-    );
-    res.json(rows);
-});
-
-// Ambulance fleet
-router.get('/ambulances', requireRole('Admin'), async (req, res) => {
-    const [rows] = await mysqlPool.query(
-        'SELECT ambulance_id, vehicle_number, driver_name, driver_phone, status FROM AMBULANCE ORDER BY vehicle_number'
-    );
-    res.json(rows);
-});
-
-router.post('/ambulance/:id/dispatch', requireRole('Admin'), async (req, res) => {
-    const { patient_name, pickup_location, destination, contact_phone } = req.body;
-    // Phase 5: INSERT into MongoDB ambulance_dispatch_log {ambulance_id, patient_name, pickup_location, destination, contact_phone, dispatched_at}
-    await mysqlPool.query("UPDATE AMBULANCE SET status='On Duty' WHERE ambulance_id=?", [req.params.id]);
-    res.json({ message: 'Ambulance dispatched' });
-});
-
-router.post('/ambulance/:id/release', requireRole('Admin'), async (req, res) => {
-    await mysqlPool.query("UPDATE AMBULANCE SET status='Available' WHERE ambulance_id=?", [req.params.id]);
-    res.json({ message: 'Ambulance released' });
-});
-
-// ---- All patients (for admin-patients.html) ----
+// ---- All patients (for admin-patients.html; allergies derived from PATIENT_ALLERGY) ----
 router.get('/patients/all', async (req, res) => {
     try {
         const [rows] = await mysqlPool.query(
             `SELECT p.patient_id, u.name, u.email, u.phone, u.is_active,
-                    p.blood_group, p.dob, p.gender, p.allergies
-             FROM PATIENT p JOIN \`USER\` u ON p.patient_id = u.user_id
+                    p.blood_group, p.dob, p.gender, vpa.allergies
+             FROM PATIENT p
+             JOIN \`USER\` u ON p.patient_id = u.user_id
+             LEFT JOIN vw_patient_allergies vpa ON p.patient_id = vpa.patient_id
              ORDER BY u.name`
         );
         res.json(rows);

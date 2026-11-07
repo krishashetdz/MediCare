@@ -97,9 +97,7 @@
                 </button>
             </form>
 
-            <!-- Demo accounts: these are the Phase 2 seed users. Kept because the
-                 whole point of this build is a walkthrough demo; the buttons only
-                 fill the form, they never bypass /api/auth/login. -->
+            <!-- Demo accounts: these are the seed users with bcrypt-hashed passwords in db/seed.sql. -->
             <div class="mv-demo">
                 <p class="mv-demo-label" id="demoLabel">Demonstration accounts</p>
                 <div class="mv-demo-grid" role="group" aria-labelledby="demoLabel" id="demoGrid"></div>
@@ -152,16 +150,14 @@
     });
 
     /* --------------------------------------------------------- demo accounts */
-    // Seed credentials from 02_DDL_DML (password_hash values, which
-    // routes/auth.js accepts as a plaintext fallback for the demo data).
     const DEMO = [
-        { role: 'Admin',        icon: 'shield',          email: 'admin@medivault.in',            pass: 'hash_admin1' },
-        { role: 'Doctor',       icon: 'stethoscope',     email: 'sharma.doc@medivault.in',       pass: 'hash_doc1' },
-        { role: 'Patient',      icon: 'user-round',      email: 'rahul.verma@gmail.com',         pass: 'hash_pat1' },
-        { role: 'Nurse',        icon: 'heart-handshake', email: 'kavita.joshi@medivault.in',     pass: 'hash_staff1' },
-        { role: 'Lab Tech',     icon: 'flask-conical',   email: 'arjun.pillai@medivault.in',     pass: 'hash_staff2' },
-        { role: 'Pharmacist',   icon: 'pill',            email: 'neha.kapoor@medivault.in',      pass: 'hash_staff3' },
-        { role: 'Receptionist', icon: 'concierge-bell',  email: 'suresh.rao@medivault.in',       pass: 'hash_staff4' }
+        { role: 'Admin',        icon: 'shield',          email: 'admin@medivault.in',            pass: 'admin1' },
+        { role: 'Doctor',       icon: 'stethoscope',     email: 'sharma.doc@medivault.in',       pass: 'doc1' },
+        { role: 'Patient',      icon: 'user-round',      email: 'rahul.verma@gmail.com',         pass: 'pat1' },
+        { role: 'Nurse',        icon: 'heart-handshake', email: 'kavita.joshi@medivault.in',     pass: 'staff1' },
+        { role: 'Lab Tech',     icon: 'flask-conical',   email: 'arjun.pillai@medivault.in',     pass: 'staff2' },
+        { role: 'Pharmacist',   icon: 'pill',            email: 'neha.kapoor@medivault.in',      pass: 'staff3' },
+        { role: 'Receptionist', icon: 'concierge-bell',  email: 'suresh.rao@medivault.in',       pass: 'staff4' }
     ];
 
     const grid = document.getElementById('demoGrid');
@@ -212,8 +208,6 @@
 
         const restore = MV.pending(submitBtn, 'Signing in...');
         try {
-            // noRedirect: a 401 here is a wrong password, not an expired session --
-            // the default handler would bounce us to this same page in a loop.
             const data = await MV.api('/api/auth/login', {
                 method: 'POST',
                 body: { email: emailInput.value.trim(), password: passInput.value },

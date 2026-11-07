@@ -114,7 +114,7 @@ router.post('/blood-bank/request', requireRole('Admin', 'Doctor', 'Nurse'), asyn
         await sendNotification({ role_name: 'Admin', message: alertMsg, event_type: 'blood_request' });
 
         res.status(201).json({
-            message: 'Blood request recorded. Inventory remains unchanged until fulfilled.',
+            message: 'Blood request recorded. Inventory remains unchanged until approved and fulfilled.',
             request_id: result.insertId
         });
     } catch (err) {
@@ -140,7 +140,7 @@ router.post('/blood-bank/requests/:id/approve', requireRole('Admin', 'Doctor'), 
         if (reqRow) {
             await sendNotification({
                 user_id: reqRow.requested_by,
-                message: `Your blood request for ${reqRow.units} units of ${reqRow.blood_group} has been approved. Awaiting pharmacy/lab issue.`,
+                message: `Your blood request for ${reqRow.units} units of ${reqRow.blood_group} has been approved. Ready for issuance.`,
                 event_type: 'blood_approved'
             });
         }
@@ -180,7 +180,7 @@ router.post('/blood-bank/requests/:id/reject', requireRole('Admin', 'Doctor'), a
 });
 
 // -----------------------------------------------------------------------------
-// Blood Request: Fulfill & Deduct Inventory (Transactional)
+// Blood Request: Fulfill & Deduct Inventory (Transactional; requires Approved status)
 // -----------------------------------------------------------------------------
 router.post('/blood-bank/requests/:id/fulfill', requireRole('Admin', 'Doctor', 'Nurse'), async (req, res) => {
     const conn = await mysqlPool.getConnection();
@@ -203,6 +203,10 @@ router.post('/blood-bank/requests/:id/fulfill', requireRole('Admin', 'Doctor', '
             await conn.rollback();
             return res.status(400).json({ error: 'Cannot fulfill a rejected request' });
         }
+        if (reqRow.status !== 'Approved') {
+            await conn.rollback();
+            return res.status(409).json({ error: 'Blood request must be Approved before it can be fulfilled' });
+        }
 
         // Check inventory
         const [[bankRow]] = await conn.query(
@@ -224,8 +228,8 @@ router.post('/blood-bank/requests/:id/fulfill', requireRole('Admin', 'Doctor', '
 
         // Mark request fulfilled
         await conn.query(
-            "UPDATE BLOOD_REQUEST SET status = 'Fulfilled', fulfilled_at = NOW(), approved_by = COALESCE(approved_by, ?) WHERE request_id = ?",
-            [req.session.user.id, req.params.id]
+            "UPDATE BLOOD_REQUEST SET status = 'Fulfilled', fulfilled_at = NOW() WHERE request_id = ?",
+            [req.params.id]
         );
 
         await conn.commit();
@@ -264,12 +268,17 @@ router.post('/blood-bank/requests/:id/fulfill', requireRole('Admin', 'Doctor', '
 });
 
 // -----------------------------------------------------------------------------
-// Ambulance Fleet & Dispatch
+// Ambulance Fleet & Dispatch (Linked to EMERGENCY_CASE)
 // -----------------------------------------------------------------------------
 router.get('/ambulances', requireRole('Admin', 'Receptionist', 'Doctor', 'Nurse'), async (req, res) => {
     try {
         const [rows] = await mysqlPool.query(
-            'SELECT ambulance_id, vehicle_number, driver_name, driver_phone, status FROM AMBULANCE ORDER BY vehicle_number'
+            `SELECT a.ambulance_id, a.vehicle_number, a.driver_name, a.driver_phone, a.status,
+                    ad.dispatch_id, ad.case_id, ec.emg_number, ad.patient_name AS dispatch_patient_name, ad.pickup_location
+             FROM AMBULANCE a
+             LEFT JOIN AMBULANCE_DISPATCH ad ON a.ambulance_id = ad.ambulance_id AND ad.status = 'In Transit'
+             LEFT JOIN EMERGENCY_CASE ec ON ad.case_id = ec.case_id
+             ORDER BY a.vehicle_number`
         );
         res.json(rows);
     } catch (err) {
@@ -278,29 +287,145 @@ router.get('/ambulances', requireRole('Admin', 'Receptionist', 'Doctor', 'Nurse'
 });
 
 router.post('/ambulance/:id/dispatch', requireRole('Admin', 'Receptionist'), async (req, res) => {
-    const { patient_name, pickup_location, destination, contact_phone } = req.body;
+    const {
+        patient_name,
+        pickup_location,
+        destination = 'Hospital',
+        contact_phone,
+        case_id,
+        initial_complaint,
+        triage_priority = 'P2'
+    } = req.body;
+
     if (![patient_name, pickup_location, destination, contact_phone].every(x => typeof x === 'string' && x.trim())) {
         return res.status(400).json({ error: 'Complete all dispatch fields (patient name, pickup, destination, contact phone)' });
     }
 
+    const conn = await mysqlPool.getConnection();
     try {
-        const [result] = await mysqlPool.query(
-            "UPDATE AMBULANCE SET status='On Duty' WHERE ambulance_id=? AND status='Available'",
+        await conn.beginTransaction();
+
+        const [ambRows] = await conn.query(
+            "SELECT * FROM AMBULANCE WHERE ambulance_id = ? FOR UPDATE",
             [req.params.id]
         );
-        if (!result.affectedRows) {
+        if (!ambRows.length) {
+            await conn.rollback();
+            return res.status(404).json({ error: 'Ambulance not found' });
+        }
+        const amb = ambRows[0];
+        if (amb.status !== 'Available') {
+            await conn.rollback();
             return res.status(409).json({ error: 'This ambulance is no longer available' });
         }
 
-        const [[amb]] = await mysqlPool.query('SELECT vehicle_number, driver_name FROM AMBULANCE WHERE ambulance_id=?', [req.params.id]);
+        // Resolve or link emergency case
+        let linkedCaseId = case_id ? Number(case_id) : null;
+        let linkedEmgNumber = null;
+
+        if (linkedCaseId) {
+            const [[existingCase]] = await conn.query(
+                'SELECT case_id, emg_number FROM EMERGENCY_CASE WHERE case_id = ? FOR UPDATE',
+                [linkedCaseId]
+            );
+            if (!existingCase) {
+                await conn.rollback();
+                return res.status(404).json({ error: 'Specified emergency case not found' });
+            }
+            linkedEmgNumber = existingCase.emg_number;
+            await conn.query(
+                "UPDATE EMERGENCY_CASE SET ambulance_id = ?, arrival_method = 'Ambulance' WHERE case_id = ?",
+                [req.params.id, linkedCaseId]
+            );
+        } else {
+            // Check if an active waiting case matches this patient name without an ambulance yet
+            const [matchingCases] = await conn.query(
+                `SELECT ec.case_id, ec.emg_number
+                 FROM EMERGENCY_CASE ec
+                 LEFT JOIN \`USER\` u ON ec.patient_id = u.user_id
+                 WHERE ec.ambulance_id IS NULL
+                   AND ec.status NOT IN ('Discharged', 'Transferred')
+                   AND (ec.temp_patient_name = ? OR u.name = ?)
+                 ORDER BY ec.arrival_time DESC LIMIT 1 FOR UPDATE`,
+                [patient_name.trim(), patient_name.trim()]
+            );
+
+            if (matchingCases.length) {
+                linkedCaseId = matchingCases[0].case_id;
+                linkedEmgNumber = matchingCases[0].emg_number;
+                await conn.query(
+                    "UPDATE EMERGENCY_CASE SET ambulance_id = ?, arrival_method = 'Ambulance' WHERE case_id = ?",
+                    [req.params.id, linkedCaseId]
+                );
+            } else {
+                // Auto-create an incoming Emergency Case linked to this ambulance dispatch
+                const currentYear = new Date().getFullYear();
+                await conn.query(
+                    'INSERT INTO EMERGENCY_SEQUENCE (seq_year, last_val) VALUES (?, 0) ON DUPLICATE KEY UPDATE last_val = last_val',
+                    [currentYear]
+                );
+                const [[seqRow]] = await conn.query(
+                    'SELECT last_val FROM EMERGENCY_SEQUENCE WHERE seq_year = ? FOR UPDATE',
+                    [currentYear]
+                );
+                const nextSeq = (seqRow ? seqRow.last_val : 0) + 1;
+                await conn.query(
+                    'UPDATE EMERGENCY_SEQUENCE SET last_val = ? WHERE seq_year = ?',
+                    [nextSeq, currentYear]
+                );
+                linkedEmgNumber = `EMG-${currentYear}-${String(nextSeq).padStart(3, '0')}`;
+
+                const [[emgDept]] = await conn.query(
+                    "SELECT department_id FROM DEPARTMENT WHERE department_name = 'Emergency Medicine' LIMIT 1"
+                );
+                const [caseIns] = await conn.query(
+                    `INSERT INTO EMERGENCY_CASE (
+                        emg_number, temp_patient_name, contact_phone, arrival_time, arrival_method,
+                        ambulance_id, initial_complaint, triage_priority, status, department_id
+                    ) VALUES (?, ?, ?, NOW(), 'Ambulance', ?, ?, ?, 'Waiting', ?)`,
+                    [
+                        linkedEmgNumber,
+                        patient_name.trim(),
+                        contact_phone.trim(),
+                        Number(req.params.id),
+                        (initial_complaint && initial_complaint.trim()) || `Ambulance dispatch pickup from ${pickup_location.trim()}`,
+                        ['P1', 'P2', 'P3', 'P4'].includes(triage_priority) ? triage_priority : 'P2',
+                        emgDept ? emgDept.department_id : null
+                    ]
+                );
+                linkedCaseId = caseIns.insertId;
+            }
+        }
+
+        await conn.query("UPDATE AMBULANCE SET status = 'On Duty' WHERE ambulance_id = ?", [req.params.id]);
+
+        const [dispRes] = await conn.query(
+            `INSERT INTO AMBULANCE_DISPATCH (
+                ambulance_id, case_id, patient_name, pickup_location, destination, contact_phone, dispatched_by, status
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, 'In Transit')`,
+            [
+                Number(req.params.id),
+                linkedCaseId,
+                patient_name.trim(),
+                pickup_location.trim(),
+                destination.trim(),
+                contact_phone.trim(),
+                req.session.user.id
+            ]
+        );
+
+        await conn.commit();
 
         // MongoDB Dispatch Log & Audit
         try {
             const mongo = getMongo();
             await mongo.collection('ambulance_dispatch_log').insertOne({
+                dispatch_id: dispRes.insertId,
                 ambulance_id: Number(req.params.id),
-                vehicle_number: amb ? amb.vehicle_number : null,
-                driver_name: amb ? amb.driver_name : null,
+                case_id: linkedCaseId,
+                emg_number: linkedEmgNumber,
+                vehicle_number: amb.vehicle_number,
+                driver_name: amb.driver_name,
                 patient_name: patient_name.trim(),
                 pickup_location: pickup_location.trim(),
                 destination: destination.trim(),
@@ -315,7 +440,10 @@ router.post('/ambulance/:id/dispatch', requireRole('Admin', 'Receptionist'), asy
                 action: 'DISPATCH ambulance',
                 table_affected: 'AMBULANCE',
                 details: {
+                    dispatch_id: dispRes.insertId,
                     ambulance_id: Number(req.params.id),
+                    case_id: linkedCaseId,
+                    emg_number: linkedEmgNumber,
                     patient_name: patient_name.trim(),
                     pickup_location: pickup_location.trim(),
                     destination: destination.trim(),
@@ -325,26 +453,42 @@ router.post('/ambulance/:id/dispatch', requireRole('Admin', 'Receptionist'), asy
             });
         } catch (_) {}
 
-        // Send Notification to Emergency Staff
         await sendNotification({
             role_name: 'Nurse',
-            message: `Ambulance ${amb ? amb.vehicle_number : req.params.id} dispatched to ${pickup_location.trim()} for ${patient_name.trim()}.`,
+            message: `Ambulance ${amb.vehicle_number} dispatched to ${pickup_location.trim()} for ${patient_name.trim()} (Case ${linkedEmgNumber || '#' + linkedCaseId}).`,
             event_type: 'ambulance_dispatched'
         });
 
-        res.json({ message: 'Ambulance dispatched successfully' });
+        res.json({
+            message: 'Ambulance dispatched successfully',
+            dispatch_id: dispRes.insertId,
+            case_id: linkedCaseId,
+            emg_number: linkedEmgNumber
+        });
     } catch (err) {
+        await conn.rollback();
         console.error('Ambulance dispatch error:', err);
         res.status(500).json({ error: 'Failed to dispatch ambulance' });
+    } finally {
+        conn.release();
     }
 });
 
 router.post('/ambulance/:id/release', requireRole('Admin', 'Receptionist', 'Nurse'), async (req, res) => {
+    const conn = await mysqlPool.getConnection();
     try {
-        const [result] = await mysqlPool.query("UPDATE AMBULANCE SET status='Available' WHERE ambulance_id=?", [req.params.id]);
+        await conn.beginTransaction();
+        const [result] = await conn.query("UPDATE AMBULANCE SET status='Available' WHERE ambulance_id=?", [req.params.id]);
         if (!result.affectedRows) {
+            await conn.rollback();
             return res.status(404).json({ error: 'Ambulance not found' });
         }
+
+        await conn.query(
+            "UPDATE AMBULANCE_DISPATCH SET status = 'Completed', completed_at = NOW() WHERE ambulance_id = ? AND status = 'In Transit'",
+            [req.params.id]
+        );
+        await conn.commit();
 
         // Update MongoDB log
         try {
@@ -357,7 +501,10 @@ router.post('/ambulance/:id/release', requireRole('Admin', 'Receptionist', 'Nurs
 
         res.json({ message: 'Ambulance marked available' });
     } catch (err) {
+        await conn.rollback();
         res.status(500).json({ error: 'Failed to release ambulance' });
+    } finally {
+        conn.release();
     }
 });
 

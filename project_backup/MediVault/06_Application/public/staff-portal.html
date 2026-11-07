@@ -680,9 +680,10 @@
                       '<button type="button" class="mv-btn mv-btn-sm mv-btn-outline me-1" onclick="window.openNurseNotes(' + p.patient_id + ', \'' + MV.esc(p.patient_name) + '\')">' +
                         '<i class="fas fa-note-sticky"></i> Note' +
                       '</button>' +
-                      '<button type="button" class="mv-btn mv-btn-sm mv-btn-outline" onclick="window.openNurseTransfer(' + p.patient_id + ', \'' + MV.esc(p.patient_name) + '\', ' + p.bed_id + ', \'' + MV.esc(p.ward_name + ' ' + p.bed_number) + '\')">' +
+                      '<button type="button" class="mv-btn mv-btn-sm mv-btn-outline me-1" title="Transfer Bed" onclick="window.openNurseTransfer(' + p.patient_id + ', \'' + MV.esc(p.patient_name) + '\', ' + p.bed_id + ', \'' + MV.esc(p.ward_name + ' ' + p.bed_number) + '\')">' +
                         '<i class="fas fa-right-left"></i>' +
                       '</button>' +
+                      (p.admission_id ? '<button type="button" class="mv-btn mv-btn-sm mv-btn-outline text-danger" title="Discharge Inpatient" onclick="window.dischargeInpatient(' + p.admission_id + ', ' + p.bed_id + ', \'' + MV.esc(p.patient_name) + '\')"><i class="fas fa-door-open"></i></button>' : '') +
                     '</td>' +
                   '</tr>';
             });
@@ -868,9 +869,38 @@
         board.innerHTML = html;
     }
 
-    window.viewBed = function (bedNumber) {
+    window.dischargeInpatient = async function (admissionId, bedId, patientName) {
+        const summary = window.prompt('Enter discharge clinical summary for ' + patientName + ':', 'Patient discharged in stable condition.');
+        if (!summary) return;
+        try {
+            const res = await MV.api.post('/api/staff/nurse/discharge-inpatient', {
+                admission_id: admissionId,
+                bed_id: bedId,
+                discharge_summary: summary
+            });
+            MV.toast({ message: res.message, type: 'success' });
+            renderNursePatients();
+        } catch (err) {
+            MV.toast({ message: err.message, type: 'danger' });
+        }
+    };
+
+    window.viewBed = async function (bedNumber) {
         const bed = beds.find(function (b) { return b.bed_number === bedNumber; });
         if (!bed) return;
+        if (bed.status === 'Cleaning') {
+            const ok = await MV.confirm('Mark Bed ' + bed.bed_number + ' as cleaned and Available?');
+            if (!ok) return;
+            try {
+                await MV.api.post('/api/staff/nurse/beds/' + bed.bed_id + '/mark-available', {});
+                MV.toast({ message: 'Bed ' + bed.bed_number + ' is now Available', type: 'success' });
+                await loadBeds();
+                renderBeds();
+            } catch (err) {
+                MV.toast({ message: err.message, type: 'danger' });
+            }
+            return;
+        }
         MV.toast({ message: bed.status === 'Available' ? 'Bed available' : 'Occupied by ' + (bed.patient_name || 'patient'), type: 'info' });
     };
 

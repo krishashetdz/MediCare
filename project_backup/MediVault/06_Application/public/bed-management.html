@@ -141,8 +141,8 @@
        Bed Management - visual ward map.
 
        vw_bed_occupancy gives ward-level rollups (occupied/total).
-       Clicking a tile fetches one BED row via GET /api/beds/:id,
-       then opens a drawer with assign/release actions.
+       Clicking a tile fetches one BED row via GET /api/admin/beds/:id,
+       then opens a drawer with assign/discharge/mark-available actions.
        ================================================================= */
 
     let drawerInstance;
@@ -198,8 +198,6 @@
                 return;
             }
 
-            // Each ward is one card. Fetch all beds for all wards in parallel
-            // (vw_bed_occupancy gives counts, not individual rows).
             const bedsByWard = {};
             await Promise.all(wards.map(async function (w) {
                 const rows = await MV.api.get('/api/admin/beds?ward=' + encodeURIComponent(w.ward_name));
@@ -228,7 +226,6 @@
 
             MV.icons(slot);
 
-            // Attach click listeners
             slot.querySelectorAll('.bed-tile').forEach(function (tile) {
                 tile.addEventListener('click', function () {
                     const bedId = this.getAttribute('data-bed-id');
@@ -247,7 +244,7 @@
     function bedTile(bed) {
         const isAvail = bed.status === 'Available';
         const isOccup = bed.status === 'Occupied';
-        const isClean = bed.status === 'Cleaning' || bed.status === 'Maintenance';
+        const isClean = bed.status === 'Cleaning' || bed.status === 'Maintenance' || bed.status === 'Reserved';
         let cls = 'is-available';
         if (isOccup) cls = 'is-occupied';
         else if (isClean) cls = 'is-cleaning';
@@ -284,6 +281,7 @@
     function renderDrawer(bed) {
         const body = document.getElementById('bedDrawerBody');
         const avail = bed.status === 'Available';
+        const cleaning = bed.status === 'Cleaning' || bed.status === 'Maintenance';
 
         document.getElementById('bedDrawerLabel').textContent =
             bed.ward_name + ' · ' + bed.bed_number;
@@ -301,13 +299,15 @@
 
         html += '</div>';
 
-        // Actions: assign if available, release if occupied
         if (avail) {
             html += '<button type="button" class="mv-btn mv-btn-primary w-100" id="assignBtn">' +
                 MV.icon('user-plus') + '<span>Assign Patient</span></button>';
+        } else if (cleaning) {
+            html += '<button type="button" class="mv-btn mv-btn-primary w-100" id="markAvailBtn">' +
+                MV.icon('check-circle') + '<span>Complete Cleaning &amp; Mark Available</span></button>';
         } else {
             html += '<button type="button" class="mv-btn mv-btn-danger w-100" id="releaseBtn">' +
-                MV.icon('user-minus') + '<span>Release Bed</span></button>';
+                MV.icon('user-minus') + '<span>Discharge &amp; Release to Cleaning</span></button>';
         }
 
         body.innerHTML = html;
@@ -316,6 +316,10 @@
         if (avail) {
             document.getElementById('assignBtn').addEventListener('click', function () {
                 assignBed(bed);
+            });
+        } else if (cleaning) {
+            document.getElementById('markAvailBtn').addEventListener('click', function () {
+                markAvailable(bed);
             });
         } else {
             document.getElementById('releaseBtn').addEventListener('click', function () {
@@ -328,7 +332,6 @@
     async function assignBed(bed) {
         const body = document.getElementById('bedDrawerBody');
 
-        // Simple patient search form
         body.innerHTML = '<div class="mb-4">' +
             '<label for="patientSearch" class="form-label">Search Patient</label>' +
             '<input type="text" class="form-control" id="patientSearch" placeholder="Name or email..." autocomplete="off">' +
@@ -399,18 +402,32 @@
         }
     }
 
-    /* ----------------------------------------------- release workflow */
+    /* ----------------------------------------------- release & cleaning workflow */
     async function releaseBed(bed) {
-        const ok = await MV.confirm('Release this bed? The patient record will remain, but the bed will become available.');
+        const ok = await MV.confirm('Discharge this patient and release bed to Cleaning? The inpatient admission will close and the stay charge will be added to their bill.');
         if (!ok) return;
 
         try {
-            await MV.api.patch('/api/admin/beds/' + bed.bed_id, { patient_id: null, status: 'Available' });
-            MV.toast.success('Bed released', 'Bed is now available');
+            await MV.api.patch('/api/admin/beds/' + bed.bed_id, { patient_id: null, status: 'Cleaning' });
+            MV.toast.success('Patient discharged', 'Admission closed, bill finalized, and bed moved to Cleaning');
             drawerInstance.hide();
             loadWards();
         } catch (err) {
             MV.toast.error('Release failed', err.message);
+        }
+    }
+
+    async function markAvailable(bed) {
+        const ok = await MV.confirm('Mark this bed as cleaned and Available for new admissions?');
+        if (!ok) return;
+
+        try {
+            await MV.api.patch('/api/admin/beds/' + bed.bed_id, { patient_id: null, status: 'Available' });
+            MV.toast.success('Bed available', 'Bed is now Available');
+            drawerInstance.hide();
+            loadWards();
+        } catch (err) {
+            MV.toast.error('Action failed', err.message);
         }
     }
 })();
