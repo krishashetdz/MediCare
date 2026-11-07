@@ -95,11 +95,15 @@ router.patch('/appointments/:id/status', async (req, res) => {
     try {
         const mongo = getMongo();
         await mongo.collection('audit_log').insertOne({
-            event: status === 'Confirmed' ? 'appointment_confirmed_by_doctor' : 'appointment_status_updated_by_doctor',
-            appointment_id: Number(req.params.id),
-            doctor_id: req.session.user.id,
-            status: status,
-            updated_at: new Date()
+            user_id: req.session.user.id,
+            action: status === 'Confirmed' ? 'CONFIRM appointment' : 'UPDATE appointment status',
+            table_affected: 'APPOINTMENT',
+            details: {
+                appointment_id: Number(req.params.id),
+                doctor_id: req.session.user.id,
+                status: status
+            },
+            timestamp: new Date()
         });
     } catch (_) {}
 
@@ -301,15 +305,19 @@ router.post('/consultations', async (req, res) => {
     try {
         const mongo = getMongo();
         await mongo.collection('audit_log').insertOne({
-            event: 'consultation_completed',
-            consultation_id: result.insertId,
-            appointment_id: Number(appointment_id),
-            doctor_id: req.session.user.id,
-            doctor_name: req.session.user.name,
-            diagnosis_summary: diagnosis ? diagnosis.slice(0, 200) : '',
-            recommended_admission: !!recommend_admission,
-            recommended_ward: recommend_admission ? (recommended_ward || 'General Ward') : null,
-            completed_at: new Date()
+            user_id: req.session.user.id,
+            action: 'COMPLETE consultation',
+            table_affected: 'CONSULTATION',
+            details: {
+                consultation_id: result.insertId,
+                appointment_id: Number(appointment_id),
+                doctor_id: req.session.user.id,
+                doctor_name: req.session.user.name,
+                diagnosis_summary: diagnosis ? diagnosis.slice(0, 200) : '',
+                recommended_admission: !!recommend_admission,
+                recommended_ward: recommend_admission ? (recommended_ward || 'General Ward') : null
+            },
+            timestamp: new Date()
         });
     } catch (mongoErr) {
         console.warn('MongoDB audit_log write failed (non-fatal):', mongoErr.message);

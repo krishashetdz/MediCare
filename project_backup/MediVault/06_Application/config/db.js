@@ -9,6 +9,7 @@ const mysqlPool = mysql.createPool({
     user: process.env.MYSQL_USER || 'root',
     password: process.env.MYSQL_PASSWORD || '',
     database: process.env.MYSQL_DATABASE || 'medivault',
+    dateStrings: ['DATE'],
     waitForConnections: true,
     connectionLimit: 10
 });

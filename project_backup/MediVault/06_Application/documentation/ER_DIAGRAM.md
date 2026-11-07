@@ -1,63 +1,81 @@
 # Entity-Relationship (ER) Diagram
-## MediCare Database Architecture
-
-The following Mermaid diagram represents the complete relational entity model of MediCare, including core hospital entities, the Emergency Ward, dynamic triage tracking, and resource inventory:
+## MediVault / MediCare 3NF Relational Schema
 
 ```mermaid
 erDiagram
-    USER ||--o| PATIENT : "identifies"
-    USER ||--o| DOCTOR : "identifies"
-    USER ||--o| STAFF : "identifies"
-    DEPARTMENT ||--o{ DOCTOR : "employs"
-    DEPARTMENT ||--o{ APPOINTMENT : "hosts"
+    ROLE ||--o{ USER : "assigns"
+    USER ||--o| PATIENT : "extends"
+    USER ||--o| DOCTOR : "extends"
+    USER ||--o| STAFF : "extends"
 
+    DEPARTMENT ||--o{ DOCTOR : "employs"
+    DOCTOR ||--o| DEPARTMENT : "heads (hod_doctor_id)"
+    DEPARTMENT ||--o{ STAFF : "assigns"
+
+    DOCTOR ||--o{ DOCTOR_SHIFT : "works"
+    DOCTOR ||--o{ DOCTOR_LEAVE : "requests"
+
+    PATIENT ||--o{ PATIENT_ALLERGY : "has (1NF)"
     PATIENT ||--o{ APPOINTMENT : "books"
     DOCTOR ||--o{ APPOINTMENT : "conducts"
-    APPOINTMENT ||--o| CONSULTATION : "results in"
+    APPOINTMENT ||--o| CONSULTATION : "yields"
     PATIENT ||--o{ MEDICAL_RECORD : "accumulates"
     DOCTOR ||--o{ MEDICAL_RECORD : "authors"
 
     CONSULTATION ||--o{ PRESCRIPTION : "generates"
     PRESCRIPTION ||--o{ PRESCRIPTION_ITEM : "contains"
-    MEDICINE ||--o{ PRESCRIPTION_ITEM : "dispensed in"
+    MEDICINE ||--o{ PRESCRIPTION_ITEM : "specified in"
+    MEDICINE ||--o{ MEDICINE_BATCH : "stocked in (FEFO)"
+    PRESCRIPTION ||--o| DISPENSING_RECORD : "fulfilled by"
+    DISPENSING_RECORD ||--o{ DISPENSING_ITEM : "deducts"
+    MEDICINE_BATCH ||--o{ DISPENSING_ITEM : "supplies"
 
     CONSULTATION ||--o{ LAB_REQUEST : "orders"
-    LAB_TEST ||--o{ LAB_REQUEST : "specified by"
-    LAB_REQUEST ||--o| LAB_REPORT : "fulfilled by"
-    STAFF ||--o{ LAB_REPORT : "performed by"
+    LAB_TEST ||--o{ LAB_REQUEST : "defines"
+    LAB_REQUEST ||--o| LAB_REPORT : "completed by"
+    STAFF ||--o{ LAB_REPORT : "authored by"
 
-    BED ||--o{ ADMISSION : "accommodates"
+    WARD ||--o{ BED : "contains"
+    CONSULTATION ||--o{ ADMISSION_REQUEST : "recommends"
+    WARD ||--o{ ADMISSION_REQUEST : "targeted by"
+    ADMISSION_REQUEST ||--o| ADMISSION : "fulfilled by"
+    BED ||--o{ ADMISSION : "hosts"
     PATIENT ||--o{ ADMISSION : "admitted in"
-    DOCTOR ||--o{ ADMISSION : "supervises"
 
-    PATIENT ||--o{ EMERGENCY_CASE : "presents as"
-    DOCTOR ||--o{ EMERGENCY_CASE : "assigned to"
-    BED ||--o{ EMERGENCY_CASE : "allocated to"
-    AMBULANCE ||--o{ EMERGENCY_CASE : "transported by"
+    PATIENT ||--o{ EMERGENCY_CASE : "presents in"
+    AMBULANCE ||--o{ EMERGENCY_CASE : "transports"
+    DEPARTMENT ||--o{ EMERGENCY_CASE : "routed to"
+    EMERGENCY_CASE ||--o{ EMERGENCY_DOCTOR_ASSIGNMENT : "assigned to"
+    DOCTOR ||--o{ EMERGENCY_DOCTOR_ASSIGNMENT : "attends"
+    EMERGENCY_CASE ||--o{ EMERGENCY_BED_ASSIGNMENT : "occupies"
+    BED ||--o{ EMERGENCY_BED_ASSIGNMENT : "allocated to"
+    AMBULANCE ||--o{ AMBULANCE_DISPATCH : "dispatched in"
+    EMERGENCY_CASE ||--o{ AMBULANCE_DISPATCH : "linked to"
 
-    EMERGENCY_CASE ||--o{ TRIAGE_ASSESSMENT : "triaged by"
-    USER ||--o{ TRIAGE_ASSESSMENT : "recorded by"
-    EMERGENCY_CASE ||--o{ EMERGENCY_PRIORITY_LOG : "audited by"
-    EMERGENCY_CASE ||--o{ EMERGENCY_TREATMENT_LOG : "treated by"
+    EMERGENCY_CASE ||--o{ TRIAGE_ASSESSMENT : "assessed in"
+    EMERGENCY_CASE ||--o{ EMERGENCY_PRIORITY_LOG : "audited in"
+    EMERGENCY_CASE ||--o{ EMERGENCY_TREATMENT_LOG : "treated in"
 
-    DOCTOR ||--o{ DOCTOR_SHIFT : "works"
-    PATIENT ||--o{ PATIENT_VITALS : "measured for"
-    STAFF ||--o{ PATIENT_VITALS : "recorded by"
-    PATIENT ||--o{ NURSE_NOTE : "documented for"
+    PATIENT ||--o{ BLOOD_REQUEST : "receives"
+    EMERGENCY_CASE ||--o{ BLOOD_REQUEST : "requests"
+    PATIENT ||--o{ PATIENT_VITALS : "monitored via"
+    PATIENT ||--o{ NURSE_NOTE : "documented in"
 
-    BLOOD_INVENTORY ||--o{ BLOOD_REQUEST : "supplies"
-    PATIENT ||--o{ BLOOD_REQUEST : "transfused to"
-    DOCTOR ||--o{ BLOOD_REQUEST : "prescribed by"
-    EMERGENCY_CASE ||--o{ BLOOD_REQUEST : "linked to"
+    PATIENT ||--o{ BILL : "invoiced via"
+    APPOINTMENT ||--o{ BILL : "billed for"
+    ADMISSION ||--o{ BILL : "billed for"
+    EMERGENCY_CASE ||--o{ BILL : "billed for"
+    BILL ||--o{ BILL_ITEM : "itemized in"
+    BILL ||--o{ PAYMENT : "settled via"
 
-    PATIENT ||--o{ BILL : "billed to"
-    BILL ||--o{ BILL_ITEM : "itemized into"
+    USER ||--o{ NOTIFICATION : "receives"
+    USER ||--o{ AUDIT_LOG : "logged in"
 ```
 
-### Key Cardinalities & Constraints
-- `USER` to `PATIENT`/`DOCTOR`/`STAFF`: 1-to-1 extension table inheritance.
-- `APPOINTMENT` to `CONSULTATION`: 1-to-0..1 (only completed appointments yield clinical consultations).
-- `EMERGENCY_CASE` to `TRIAGE_ASSESSMENT`: 1-to-Many (supports initial triage and subsequent clinical reassessments).
-- `EMERGENCY_CASE` to `EMERGENCY_PRIORITY_LOG`: 1-to-Many (strict immutable audit trail for every priority escalation or override).
-- `BED` to `EMERGENCY_CASE`: 1-to-0..1 active allocation enforced by row-level locking.
-
+### Key Normalization & Integrity Highlights
+- **Single-Column Surrogate/Subtype Keys**: All 34 base tables use single-column primary keys (`2NF` by construction).
+- **3NF Derivation Chains**:
+  - `APPOINTMENT.doctor_id -> DOCTOR.department_id -> DEPARTMENT`
+  - `PRESCRIPTION.consultation_id -> CONSULTATION.appointment_id -> APPOINTMENT.(patient_id, doctor_id)`
+  - `BED.ward_id -> WARD.(ward_name, floor_no, daily_rate)`
+  - `BILL -> BILL_ITEM` and `BILL -> PAYMENT` (summarized via `vw_bill_summary`).

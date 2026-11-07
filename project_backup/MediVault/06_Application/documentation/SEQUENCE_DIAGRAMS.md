@@ -1,117 +1,100 @@
 # Sequence Diagrams
-## Critical Hospital Workflows
+## End-to-End Transactional Hospital Workflows
 
-### 1. Normal Patient Outpatient Workflow
+### 1. Outpatient Booking, Rescheduling, Consultation, Lab, Dispensing & Split Payment
 ```mermaid
 sequenceDiagram
     autonumber
     actor Patient
+    actor Receptionist
     actor Doctor
+    actor LabTech as Lab Technician
     actor Pharmacist
-    participant System as Express Backend
-    participant DB as MariaDB / MySQL
+    participant API as Express Server
+    participant MySQL as MariaDB / MySQL
     participant Mongo as MongoDB
 
-    Patient->>System: POST /api/patient/book-appointment
-    System->>DB: CALL sp_book_appointment(...)
-    DB-->>System: Appointment Scheduled
-    System->>Mongo: Log audit_log event: appointment_booked
-    System-->>Patient: 201 Created (Confirmed Slot)
+    Patient->>API: POST /api/patient/book-appointment
+    API->>MySQL: CALL sp_book_appointment(patient_id, doctor_id, dept_id, date, time, booked_by)
+    MySQL-->>API: Appointment Scheduled (uq_doctor_active_slot enforced)
+    API->>Mongo: insertOne(audit_log {user_id, action: 'BOOK appointment', table_affected: 'APPOINTMENT', details, timestamp})
+    API-->>Patient: 201 Created
 
-    Doctor->>System: POST /api/doctor/consultations
-    System->>DB: INSERT INTO CONSULTATION
-    System->>DB: UPDATE APPOINTMENT SET status='Completed'
-    System->>DB: INSERT INTO MEDICAL_RECORD (Auto-sync diagnosis)
-    System->>Mongo: Log audit_log event: consultation_completed
-    System-->>Doctor: 201 Created
+    Receptionist->>API: POST /api/staff/receptionist/appointments/:id/reschedule
+    API->>MySQL: BEGIN; SELECT ... FOR UPDATE; UPDATE old status='Cancelled'; CALL sp_book_appointment(...); COMMIT
+    API->>Mongo: insertOne(audit_log {user_id, action: 'RESCHEDULE appointment', ...})
+    API-->>Receptionist: 201 Rescheduled (or 409 Conflict with full rollback if slot taken)
 
-    Doctor->>System: POST /api/doctor/prescriptions
-    System->>DB: INSERT INTO PRESCRIPTION & ITEMS
-    System-->>Doctor: Prescription Issued
+    Doctor->>API: PATCH /api/doctor/appointments/:id/status {status: 'Confirmed'}
+    API->>MySQL: UPDATE APPOINTMENT SET status='Confirmed'
+    API->>Mongo: insertOne(audit_log {user_id, action: 'CONFIRM appointment', ...})
+    API-->>Doctor: 200 OK
 
-    Pharmacist->>System: POST /api/staff/dispense
-    System->>DB: BEGIN TRANSACTION
-    System->>DB: SELECT stock_qty FROM MEDICINE FOR UPDATE
-    System->>DB: UPDATE MEDICINE SET stock_qty = stock_qty - N
-    System->>DB: COMMIT TRANSACTION
-    System-->>Pharmacist: 200 Dispensed & Stock Deducted
+    Doctor->>API: POST /api/doctor/consultations (with recommend_admission=true)
+    API->>MySQL: INSERT CONSULTATION; UPDATE APPOINTMENT status='Completed'; INSERT MEDICAL_RECORD; INSERT ADMISSION_REQUEST
+    API->>Mongo: insertOne(audit_log {user_id, action: 'COMPLETE consultation', ...})
+    API-->>Doctor: 201 Created
+
+    Doctor->>API: POST /api/doctor/prescriptions & POST /api/doctor/lab-requests
+    API->>MySQL: INSERT PRESCRIPTION + PRESCRIPTION_ITEM; INSERT LAB_REQUEST
+    API-->>Doctor: 201 Created
+
+    LabTech->>API: POST /api/staff/lab-tech/requests/:id/report
+    API->>MySQL: INSERT LAB_REPORT; UPDATE LAB_REQUEST status='Completed'
+    API->>Mongo: updateOne(lab_reports_raw) & insertOne(audit_log {action: 'INSERT lab report'})
+    API-->>LabTech: 201 Created
+
+    Pharmacist->>API: POST /api/staff/pharmacist/dispense/:prescriptionId
+    API->>MySQL: BEGIN; Lock MEDICINE_BATCH (FEFO); Deduct available_qty; INSERT DISPENSING_RECORD & DISPENSING_ITEM; UPDATE PRESCRIPTION status='Dispensed'; COMMIT
+    API->>Mongo: insertOne(audit_log {action: 'DISPENSE prescription'})
+    API-->>Pharmacist: 200 OK
+
+    Receptionist->>API: POST /api/staff/receptionist/generate-bill
+    API->>MySQL: CALL sp_generate_bill(appointment_id, user_id)
+    MySQL-->>API: BILL + BILL_ITEM rows created
+    API-->>Receptionist: 201 Created
+
+    Receptionist->>API: POST /api/billing/:billId/payments (Partial then Final)
+    API->>MySQL: INSERT INTO PAYMENT (receipt_number RCP-YYYY-XXXXX); query vw_bill_summary
+    API->>Mongo: insertOne(audit_log {action: 'RECORD payment'})
+    API-->>Receptionist: 201 Created (Partial -> Paid)
 ```
 
 ---
 
-### 2. Emergency Ward & Signature Priority Engine Workflow
+### 2. Emergency Dispatch, Triage, Priority Engine, Allocation & Discharge
 ```mermaid
 sequenceDiagram
     autonumber
+    actor AdminOrRec as Admin / Receptionist
     actor Nurse
     actor Doctor
-    participant System as Express Backend
-    participant Engine as Priority Engine Service
-    participant DB as MariaDB / MySQL
+    participant API as Express Server
+    participant MySQL as MariaDB / MySQL
     participant Mongo as MongoDB
 
-    Nurse->>System: POST /api/emergency/register (Priya Nair, Walk-in/Ambulance)
-    System->>DB: INSERT INTO EMERGENCY_CASE (EMG-2026-006)
-    System-->>Nurse: Emergency Case Created
+    AdminOrRec->>API: POST /api/admin/ambulance/:id/dispatch
+    API->>MySQL: BEGIN; Lock AMBULANCE; Increment EMERGENCY_SEQUENCE; INSERT EMERGENCY_CASE; INSERT AMBULANCE_DISPATCH; COMMIT
+    API->>Mongo: insertOne(ambulance_dispatch_log) & insertOne(audit_log {action: 'DISPATCH ambulance'})
+    API-->>AdminOrRec: 200 OK (case_id, emg_number)
 
-    Nurse->>System: POST /api/emergency/triage/:id (BP: 160/100, SpO2: 91%, HR: 118, P1)
-    System->>DB: INSERT INTO TRIAGE_ASSESSMENT
-    System->>DB: UPDATE EMERGENCY_CASE SET priority='P1', status='Triaged'
-    System->>DB: INSERT INTO EMERGENCY_PRIORITY_LOG
-    System-->>Nurse: Triage Complete
+    Nurse->>API: POST /api/emergency/triage/:caseId
+    API->>MySQL: BEGIN; INSERT TRIAGE_ASSESSMENT; INSERT EMERGENCY_PRIORITY_LOG; UPDATE EMERGENCY_CASE SET triage_priority, status='Triage'; COMMIT
+    API-->>Nurse: 201 Created
 
-    Nurse->>System: POST /api/emergency/priority-engine/:id
-    System->>Engine: evaluateCase(case_id)
-    Engine->>DB: Query case vitals, complaints & severity
-    Engine->>DB: Query on-duty DOCTOR_SHIFT & current active caseload
-    Engine->>DB: Query available BED in Emergency/ICU wards
-    Engine-->>System: Recommendations (Dr. Bhosale [Cardiology], Bed E-05)
-    System->>Mongo: Log audit_log: emergency_priority_engine_evaluated
-    System-->>Nurse: 200 OK with Rationale & Recommendations
+    Nurse->>API: GET /api/emergency/priority-engine/:caseId
+    API->>MySQL: Query EMERGENCY_CASE, TRIAGE_ASSESSMENT, on-duty DOCTOR_SHIFT (excluding DOCTOR_LEAVE), and Available BEDs
+    API-->>Nurse: 200 OK (Recommended Department, Doctor & Bed with clinical rationale)
 
-    Nurse->>System: POST /api/emergency/allocate/:id (Confirm Doctor & Bed)
-    System->>DB: BEGIN TRANSACTION
-    System->>DB: SELECT * FROM BED WHERE bed_id = ? FOR UPDATE
-    System->>DB: UPDATE BED SET status='Occupied', patient_id = ?
-    System->>DB: UPDATE EMERGENCY_CASE SET assigned_doctor_id=?, assigned_bed_id=?, status='In-Treatment'
-    System->>DB: COMMIT TRANSACTION
-    System-->>Nurse: Resource Allocation Confirmed
+    Nurse->>API: POST /api/emergency/allocate/:caseId
+    API->>MySQL: BEGIN; SELECT BED FOR UPDATE; Verify Available; INSERT EMERGENCY_DOCTOR_ASSIGNMENT & EMERGENCY_BED_ASSIGNMENT; UPDATE BED status='Occupied'; COMMIT
+    API-->>Nurse: 200 OK
 
-    Doctor->>System: POST /api/emergency/discharge/:id (Clinical Summary)
-    System->>DB: BEGIN TRANSACTION
-    System->>DB: UPDATE EMERGENCY_CASE SET status='Discharged', discharge_time=NOW()
-    System->>DB: UPDATE BED SET status='Cleaning', patient_id=NULL
-    System->>DB: COMMIT TRANSACTION
-    System-->>Doctor: Case Discharged & Bed Sent to Cleaning
+    Doctor->>API: POST /api/emergency/treatment/:caseId
+    API->>MySQL: Verify doctor ownership; INSERT EMERGENCY_TREATMENT_LOG; UPDATE EMERGENCY_CASE status='In Treatment'
+    API-->>Doctor: 201 Created
+
+    Doctor->>API: POST /api/emergency/discharge/:caseId
+    API->>MySQL: BEGIN; Deactivate assignments; UPDATE BED status='Cleaning'; UPDATE EMERGENCY_CASE status='Discharged'; Create BILL & Emergency BILL_ITEM; COMMIT
+    API-->>Doctor: 200 OK
 ```
-
----
-
-### 3. Blood Bank Lifecycle & Inventory Transfusion Workflow
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Doctor
-    actor Supervisor as Lab / Bank Supervisor
-    participant System as Express Backend
-    participant DB as MariaDB / MySQL
-    participant Mongo as MongoDB
-
-    Doctor->>System: POST /api/resources/blood-bank/request (Units: 2, Group: B+)
-    System->>DB: INSERT INTO BLOOD_REQUEST (status='Pending')
-    System-->>Doctor: 201 Blood Request Created (No stock deducted yet)
-
-    Supervisor->>System: PUT /api/resources/blood-bank/approve/:id
-    System->>DB: UPDATE BLOOD_REQUEST SET status='Approved'
-    System-->>Supervisor: 200 Request Approved
-
-    Supervisor->>System: PUT /api/resources/blood-bank/fulfill/:id
-    System->>DB: BEGIN TRANSACTION
-    System->>DB: SELECT units_available FROM BLOOD_INVENTORY WHERE blood_group='B+' FOR UPDATE
-    System->>DB: UPDATE BLOOD_INVENTORY SET units_available = units_available - 2
-    System->>DB: UPDATE BLOOD_REQUEST SET status='Fulfilled'
-    System->>DB: COMMIT TRANSACTION
-    System->>Mongo: Log audit_log: blood_request_fulfilled
-    System-->>Supervisor: 200 Fulfilled & Inventory Deducted
-```
-

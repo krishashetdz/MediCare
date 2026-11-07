@@ -1,6 +1,26 @@
+/**
+ * test-e2e.js — MediVault / MediCare End-to-End Verification Suite
+ *
+ * To reset the database before re-running against a clean state:
+ *   mysql -u root medivault < db/schema.sql && mysql -u root medivault < db/seed.sql
+ *
+ * Run under both IST and UTC timezones:
+ *   TZ=Asia/Kolkata node test-e2e.js
+ *   TZ=UTC node test-e2e.js
+ */
 const http = require('http');
 
 const PORT = process.env.PORT || 3000;
+
+// Compute a future date dynamically (14 days from today in local time)
+function computeFutureDate(daysAhead = 14) {
+    const d = new Date();
+    d.setDate(d.getDate() + daysAhead);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+}
 
 function createClient(port = PORT) {
     let cookie = '';
@@ -60,6 +80,9 @@ async function runTests() {
             failed++;
         }
     }
+
+    const futureDate = computeFutureDate(14);
+    const runTag = Date.now().toString().slice(-6);
 
     try {
         const anonClient = createClient();
@@ -140,9 +163,10 @@ async function runTests() {
 
         // 2. Normal Patient Flow
         console.log('\n--- 2. Normal Patient Flow (Register -> Book -> Consult -> Lab/Mongo -> Bill -> Partial/Paid) ---');
+        const patEmail = `aarav.kulkarni.${runTag}@gmail.com`;
         const regPat = await recClient.request('POST', '/api/staff/receptionist/register-patient', {
             name: 'Aarav Kulkarni',
-            email: 'aarav.kulkarni@gmail.com',
+            email: patEmail,
             phone: '9823011223',
             password: 'aarav_secret_pw',
             dob: '1988-05-14',
@@ -156,29 +180,94 @@ async function runTests() {
         const newPatientId = regPat.data.patient_id;
 
         const loginNewPat = await patClient.request('POST', '/api/auth/login', {
-            email: 'aarav.kulkarni@gmail.com',
+            email: patEmail,
             password: 'aarav_secret_pw'
         });
         assert(loginNewPat.status === 200 && loginNewPat.data.user.role === 'Patient', 'Newly registered patient logs in via bcrypt');
 
+        // Pick a free slot on futureDate for doctor_id=2
+        const availRes = await patClient.request('GET', `/api/patient/available-slots?doctor_id=2&appointment_date=${futureDate}`);
+        const primarySlot = Array.isArray(availRes.data) && availRes.data.length ? availRes.data[0] : '10:30:00';
+        const secondarySlot = Array.isArray(availRes.data) && availRes.data.length > 1 ? availRes.data[1] : '11:00:00';
+        const tertiarySlot = Array.isArray(availRes.data) && availRes.data.length > 2 ? availRes.data[2] : '11:30:00';
+
         const bookAppt = await patClient.request('POST', '/api/patient/book-appointment', {
             doctor_id: 2,
-            appointment_date: '2026-04-15',
-            appointment_time: '10:30:00'
+            appointment_date: futureDate,
+            appointment_time: primarySlot
         });
-        assert(bookAppt.status === 201, 'Patient books appointment via sp_book_appointment (3NF)');
+        assert(bookAppt.status === 201, `Patient books appointment on ${futureDate} at ${primarySlot} via sp_book_appointment (3NF)`);
 
         const patAppts = await patClient.request('GET', '/api/patient/appointments');
-        const bookedRow = Array.isArray(patAppts.data) ? patAppts.data.find(a => a.appointment_date.startsWith('2026-04-15') && a.appointment_time === '10:30:00') : null;
-        assert(Boolean(bookedRow && bookedRow.appointment_id && bookedRow.department_name === 'Cardiology'), '3NF patient appointment query derives department_name via DOCTOR -> DEPARTMENT');
+        const bookedRow = Array.isArray(patAppts.data)
+            ? patAppts.data.find(a => a.appointment_date === futureDate && a.appointment_time === primarySlot)
+            : null;
+        assert(
+            Boolean(bookedRow && bookedRow.appointment_id && bookedRow.appointment_date === futureDate && bookedRow.department_name === 'Cardiology'),
+            '3NF patient appointment query returns exact YYYY-MM-DD dateStrings and derives department_name via DOCTOR -> DEPARTMENT'
+        );
         const newApptId = bookedRow.appointment_id;
 
         const dupAppt = await patClient.request('POST', '/api/patient/book-appointment', {
             doctor_id: 2,
-            appointment_date: '2026-04-15',
-            appointment_time: '10:30:00'
+            appointment_date: futureDate,
+            appointment_time: primarySlot
         });
         assert(dupAppt.status === 409, 'Duplicate appointment slot rejected with 409 Conflict');
+
+        // 2b. Receptionist Appointment Workflow Edges (Reschedule & Cancel)
+        console.log('\n--- 2b. Receptionist Appointment Workflow Edges (Reschedule & Cancel) ---');
+        const recBook2 = await recClient.request('POST', '/api/staff/receptionist/book-appointment', {
+            patient_id: newPatientId,
+            doctor_id: 2,
+            department_id: 1,
+            appointment_date: futureDate,
+            appointment_time: secondarySlot
+        });
+        assert(recBook2.status === 201, `Receptionist books second appointment at ${secondarySlot}`);
+
+        const recList = await recClient.request('GET', '/api/staff/receptionist/appointments');
+        const secondApptRow = Array.isArray(recList.data)
+            ? recList.data.find(a => a.patient_id === newPatientId && a.appointment_date === futureDate && a.appointment_time === secondarySlot && a.status === 'Scheduled')
+            : null;
+        const secondApptId = secondApptRow ? secondApptRow.appointment_id : null;
+
+        const reschedTaken = await recClient.request('POST', `/api/staff/receptionist/appointments/${secondApptId}/reschedule`, {
+            appointment_date: futureDate,
+            appointment_time: primarySlot
+        });
+        assert(reschedTaken.status === 409, 'Receptionist reschedule to a taken slot returns 409 Conflict (and rolls back old slot cancellation)');
+
+        const reschedFree = await recClient.request('POST', `/api/staff/receptionist/appointments/${secondApptId}/reschedule`, {
+            appointment_date: futureDate,
+            appointment_time: tertiarySlot
+        });
+        assert(
+            reschedFree.status === 201 && reschedFree.data.appointment_id,
+            `Receptionist reschedule to a free slot (${tertiarySlot}) succeeds inside transaction`
+        );
+        const rescheduledApptId = reschedFree.data.appointment_id;
+
+        const recCancel = await recClient.request('POST', `/api/staff/receptionist/appointments/${rescheduledApptId}/cancel`, {});
+        assert(recCancel.status === 200 && recCancel.data.status === 'Cancelled', 'Receptionist cancels appointment');
+
+        const rebookFreedSlot = await recClient.request('POST', '/api/staff/receptionist/book-appointment', {
+            patient_id: newPatientId,
+            doctor_id: 2,
+            department_id: 1,
+            appointment_date: futureDate,
+            appointment_time: tertiarySlot
+        });
+        assert(rebookFreedSlot.status === 201, 'Cancelling appointment frees the active slot for re-booking');
+
+        // Clean up the rebooked test slot by cancelling it so only primarySlot remains active
+        const recListAfter = await recClient.request('GET', '/api/staff/receptionist/appointments');
+        const rebookedRow = Array.isArray(recListAfter.data)
+            ? recListAfter.data.find(a => a.patient_id === newPatientId && a.appointment_date === futureDate && a.appointment_time === tertiarySlot && a.status === 'Scheduled')
+            : null;
+        if (rebookedRow) {
+            await recClient.request('POST', `/api/staff/receptionist/appointments/${rebookedRow.appointment_id}/cancel`, {});
+        }
 
         const confirmAppt = await doc1Client.request('PATCH', `/api/doctor/appointments/${newApptId}/status`, { status: 'Confirmed' });
         assert(confirmAppt.status === 200, 'Doctor confirms appointment (Confirmed in ENUM)');
@@ -205,6 +294,12 @@ async function runTests() {
         });
         assert(consultRes.status === 201 && consultRes.data.consultation_id, 'Doctor records consultation, MEDICAL_RECORD, and ADMISSION_REQUEST');
         const newConsultId = consultRes.data.consultation_id;
+
+        const reschedCompleted = await recClient.request('POST', `/api/staff/receptionist/appointments/${newApptId}/reschedule`, {
+            appointment_date: futureDate,
+            appointment_time: tertiarySlot
+        });
+        assert(reschedCompleted.status === 409, 'Block rescheduling Completed appointment (409)');
 
         const prescRes = await doc1Client.request('POST', '/api/doctor/prescriptions', {
             consultation_id: newConsultId,
@@ -362,16 +457,17 @@ async function runTests() {
             'Priority Engine matches Cardiology by department name and recommends on-shift doctor & available bed'
         );
 
+        const targetEmgBedId = prioEngine.data.recommended_bed.bed_id;
         const emgAlloc = await nurseClient.request('POST', `/api/emergency/allocate/${emgCaseId}`, {
             doctor_id: 2, // Allocate to Dr. Aditi Sharma (doc1Client)
-            bed_id: prioEngine.data.recommended_bed.bed_id,
+            bed_id: targetEmgBedId,
             department_id: prioEngine.data.recommended_department.id
         });
         assert(emgAlloc.status === 200, 'Allocate doctor and Available bed in transaction');
 
         const dupBedAlloc = await nurseClient.request('POST', '/api/emergency/allocate/2', {
             doctor_id: 2,
-            bed_id: prioEngine.data.recommended_bed.bed_id
+            bed_id: targetEmgBedId
         });
         assert(dupBedAlloc.status === 409, 'Reject allocating an already Occupied bed to another emergency case (409)');
 
@@ -415,8 +511,53 @@ async function runTests() {
         });
         assert(emgDischarge.status === 200, 'Assigned Doctor 1 discharges emergency case -> creates Emergency BILL_ITEM and moves bed to Cleaning');
 
+        // Mark emergency bed Available again so test is re-runnable
+        await nurseClient.request('POST', `/api/staff/nurse/beds/${targetEmgBedId}/mark-available`);
+
         const ambComplete = await adminClient.request('POST', '/api/admin/ambulance/1/release');
         assert(ambComplete.status === 200, 'Release ambulance dispatch and return ambulance to Available');
+
+        // 7. Admin Staff Creation (USER + STAFF transaction, duplicate email 409, non-admin 403)
+        console.log('\n--- 7. Admin Staff Creation (USER + STAFF Transaction, Duplicate 409, Non-Admin 403) ---');
+        const staffEmail = `meera.deshmukh.${runTag}@medivault.in`;
+        const nonAdminStaffCreate = await recClient.request('POST', '/api/admin/staff', {
+            name: 'Unauthorized Staff',
+            email: `unauth.${runTag}@medivault.in`,
+            password: 'staff_pw_123',
+            role: 'Nurse',
+            shift: 'Morning'
+        });
+        assert(nonAdminStaffCreate.status === 403, 'RBAC: Non-admin (Receptionist) blocked from POST /api/admin/staff (403)');
+
+        const createStaffRes = await adminClient.request('POST', '/api/admin/staff', {
+            name: 'Meera Deshmukh',
+            email: staffEmail,
+            phone: '9823099887',
+            password: 'meera_staff_pw',
+            role: 'Nurse',
+            department_id: 1,
+            shift: 'Evening'
+        });
+        assert(
+            createStaffRes.status === 201 && createStaffRes.data.staff_id && createStaffRes.data.staff_type === 'NURSE',
+            'Admin creates Nurse user (USER + STAFF rows in one transaction)'
+        );
+
+        const dupStaffEmail = await adminClient.request('POST', '/api/admin/staff', {
+            name: 'Duplicate Staff',
+            email: staffEmail,
+            password: 'another_password',
+            role: 'Pharmacist',
+            shift: 'Morning'
+        });
+        assert(dupStaffEmail.status === 409, 'Duplicate staff email returns 409 Conflict');
+
+        const newStaffClient = createClient();
+        const loginNewStaff = await newStaffClient.request('POST', '/api/auth/login', {
+            email: staffEmail,
+            password: 'meera_staff_pw'
+        });
+        assert(loginNewStaff.status === 200 && loginNewStaff.data.user.role === 'Nurse', 'Newly created staff member logs in via bcrypt');
 
         console.log('\n=== E2E VERIFICATION SUMMARY ===');
         console.log(`Total Tests Run: ${passed + failed}`);

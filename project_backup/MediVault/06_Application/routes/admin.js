@@ -202,16 +202,19 @@ router.patch('/beds/:id', requireRole('Admin', 'Nurse'), async (req, res) => {
         try {
             const mongo = getMongo();
             await mongo.collection('audit_log').insertOne({
-                event: 'bed_allocation_updated',
-                bed_id: Number(req.params.id),
-                bed_number: currentBed.bed_number,
-                ward_name: currentBed.ward_name,
-                previous_status: currentBed.status,
-                previous_patient_id: currentPatientId,
-                new_status: newStatus,
-                new_patient_id: newPatientId,
-                updated_by: req.session.user.id,
-                updated_at: new Date()
+                user_id: req.session.user.id,
+                action: 'UPDATE bed allocation',
+                table_affected: 'BED',
+                details: {
+                    bed_id: Number(req.params.id),
+                    bed_number: currentBed.bed_number,
+                    ward_name: currentBed.ward_name,
+                    previous_status: currentBed.status,
+                    previous_patient_id: currentPatientId,
+                    new_status: newStatus,
+                    new_patient_id: newPatientId
+                },
+                timestamp: new Date()
             });
         } catch (mongoErr) {
             console.warn('MongoDB audit_log write failed (non-fatal):', mongoErr.message);
@@ -436,8 +439,12 @@ router.get('/departments', async (req, res) => {
 router.get('/staff', async (req, res) => {
     try {
         const role = req.query.role || '';
-        let sql = `SELECT u.user_id, u.name, u.email, u.phone, r.role_name, u.is_active
-                   FROM \`USER\` u JOIN ROLE r ON u.role_id = r.role_id
+        let sql = `SELECT u.user_id, u.name, u.email, u.phone, r.role_name, u.is_active,
+                          s.staff_type, s.department_id, dep.department_name, s.shift
+                   FROM \`USER\` u
+                   JOIN ROLE r ON u.role_id = r.role_id
+                   LEFT JOIN STAFF s ON u.user_id = s.staff_id
+                   LEFT JOIN DEPARTMENT dep ON s.department_id = dep.department_id
                    WHERE r.role_name IN ('Doctor','Nurse','Lab Technician','Pharmacist','Receptionist')`;
         const params = [];
         if (role) { sql += ' AND r.role_name = ?'; params.push(role); }
@@ -446,6 +453,105 @@ router.get('/staff', async (req, res) => {
         res.json(rows);
     } catch (err) {
         res.status(500).json({ error: 'Failed to fetch staff' });
+    }
+});
+
+// ---- Create Staff (Nurse, Lab Technician, Pharmacist, Receptionist) inside one transaction ----
+router.post('/staff', async (req, res) => {
+    const { name, email, password, password_hash, phone, role, role_name, department_id, shift } = req.body;
+    const rawPassword = password || password_hash;
+    const targetRole = String(role || role_name || '').trim();
+
+    const ROLE_TO_STAFF_TYPE = {
+        'Nurse': 'NURSE',
+        'Lab Technician': 'LAB_TECHNICIAN',
+        'Pharmacist': 'PHARMACIST',
+        'Receptionist': 'RECEPTIONIST'
+    };
+
+    if (!name || !String(name).trim() || !email || !String(email).trim() || !rawPassword) {
+        return res.status(400).json({ error: 'Name, email, and password are required' });
+    }
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+        return res.status(400).json({ error: 'Enter a valid email address' });
+    }
+
+    const staffType = ROLE_TO_STAFF_TYPE[targetRole];
+    if (!staffType) {
+        return res.status(400).json({ error: 'Role must be one of: Nurse, Lab Technician, Pharmacist, Receptionist' });
+    }
+
+    const validShifts = ['Morning', 'Evening', 'Night'];
+    const targetShift = shift && validShifts.includes(shift) ? shift : 'Morning';
+    const targetDeptId = department_id ? Number(department_id) : null;
+
+    const conn = await mysqlPool.getConnection();
+    try {
+        await conn.beginTransaction();
+
+        const [existing] = await conn.query('SELECT user_id FROM `USER` WHERE email = ? FOR UPDATE', [normalizedEmail]);
+        if (existing.length > 0) {
+            await conn.rollback();
+            return res.status(409).json({ error: 'A user with this email already exists' });
+        }
+
+        const [roleRows] = await conn.query('SELECT role_id FROM ROLE WHERE role_name = ?', [targetRole]);
+        if (!roleRows.length) {
+            await conn.rollback();
+            return res.status(400).json({ error: 'Invalid staff role' });
+        }
+
+        const hashedPassword = String(rawPassword).startsWith('$2')
+            ? String(rawPassword)
+            : await bcrypt.hash(String(rawPassword), 10);
+
+        const [userResult] = await conn.query(
+            'INSERT INTO `USER` (name, email, password_hash, phone, role_id) VALUES (?, ?, ?, ?, ?)',
+            [String(name).trim(), normalizedEmail, hashedPassword, phone ? String(phone).trim() : null, roleRows[0].role_id]
+        );
+
+        await conn.query(
+            'INSERT INTO STAFF (staff_id, staff_type, department_id, shift) VALUES (?, ?, ?, ?)',
+            [userResult.insertId, staffType, targetDeptId, targetShift]
+        );
+
+        await conn.commit();
+
+        try {
+            await getMongo().collection('audit_log').insertOne({
+                user_id: req.session.user.id,
+                action: 'CREATE staff',
+                table_affected: 'STAFF',
+                details: {
+                    staff_id: userResult.insertId,
+                    name: String(name).trim(),
+                    email: normalizedEmail,
+                    role_name: targetRole,
+                    staff_type: staffType,
+                    department_id: targetDeptId,
+                    shift: targetShift
+                },
+                timestamp: new Date()
+            });
+        } catch (_) {}
+
+        res.status(201).json({
+            staff_id: userResult.insertId,
+            user_id: userResult.insertId,
+            role: targetRole,
+            staff_type: staffType
+        });
+    } catch (err) {
+        await conn.rollback();
+        if (err && err.code === 'ER_DUP_ENTRY') {
+            return res.status(409).json({ error: 'A user with this email already exists' });
+        }
+        console.error('Error creating staff:', err);
+        res.status(500).json({ error: 'Failed to create staff member' });
+    } finally {
+        conn.release();
     }
 });
 

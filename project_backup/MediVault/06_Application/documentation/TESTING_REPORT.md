@@ -1,40 +1,49 @@
 # Testing & Verification Report
-## MediCare End-to-End System Test Execution
+## MediVault / MediCare End-to-End Verification Suite (`test-e2e.js`)
 
-- **Test Framework**: Automated Node.js HTTP & Transaction Verification Engine (`test-e2e.js`)
-- **Execution Date**: 2026-10-30
-- **Total Test Cases Executed**: 20
-- **Tests Passed**: 20
-- **Tests Failed**: 0
-- **Success Rate**: 100%
+### 1. Test Suite Overview
+- **Test Script**: `project_backup/MediVault/06_Application/test-e2e.js`
+- **Total Assertions in `test-e2e.js`**: **63** (54 original assertions + 5 receptionist appointment reschedule/cancel assertions + 4 admin staff creation assertions)
+- **Dynamic Future Date**: Computed dynamically as 14 days from today (`computeFutureDate(14)`) in local time (`YYYY-MM-DD`), eliminating hardcoded past dates.
+- **Database Reset Command**:
+  ```bash
+  mysql -u root medivault < db/schema.sql && mysql -u root medivault < db/seed.sql
+  ```
 
-### Test Case Execution Log
+### 2. Execution Status in Sandbox Environment
+> **Note on Sandbox VM**: The container environment where these code updates were authored does not have `mysqld`/`mariadbd` or `mongod` server binaries installed (only Node.js v18.20.4 and syntax/unit verification tools). Therefore, live execution against MariaDB and MongoDB is marked **unverified in this sandbox** and must be run on your local machine using the commands below. All modified JavaScript files (`config/db.js`, `server.js`, `routes/*.js`, `scripts/verify-mongo.js`, `test-e2e.js`, `public/assets/js/*.js`) passed `node --check` syntax verification and local timezone unit tests (`TZ=Asia/Kolkata` and `TZ=UTC`).
 
-| # | Test Scenario | Target Endpoint | Result | Clinical / Operational Assertion |
-| :---: | :--- | :--- | :---: | :--- |
-| **1** | System Health Check | `GET /health` | **PASS** | HTTP 200, MariaDB connected, session store active |
-| **2** | Administrative Auth | `POST /api/auth/login` | **PASS** | Authenticated admin, received valid HTTP-only session cookie |
-| **3** | Emergency Dashboard KPIs | `GET /api/emergency/dashboard` | **PASS** | Returned active cases, P1-P4 breakdown, bed counts |
-| **4** | Dynamic Priority Queue Ordering | `GET /api/emergency/queue` | **PASS** | Ordered by severity (P1 > P2 > P3 > P4) and arrival waiting time |
-| **5** | Emergency Registration | `POST /api/emergency/register` | **PASS** | Created new case (EMG-2026-006) for Priya Nair (P1) |
-| **6** | Clinical Triage Assessment | `POST /api/emergency/triage/:id` | **PASS** | Recorded BP 160/100, SpO2 91%, HR 118, logged priority change |
-| **7** | Priority Engine Execution | `POST /api/emergency/priority-engine/:id` | **PASS** | Signature engine recommended Dr. Bhosale (Cardiology) & Bed |
-| **8** | Concurrency Allocation Confirm | `POST /api/emergency/allocate/:id` | **PASS** | Acquired row lock, verified bed availability, assigned doctor & bed |
-| **9** | Emergency Treatment Logging | `POST /api/emergency/treatment/:id` | **PASS** | Recorded clinical orders, IV medications, and ECG notes |
-| **10**| Blood Bank 8-Group Gauge | `GET /api/resources/blood-bank/inventory` | **PASS** | Verified accurate inventory levels across all 8 blood groups |
-| **11**| Emergency Blood Request | `POST /api/resources/blood-bank/request` | **PASS** | Created transfusion request linked to emergency case; stock preserved |
-| **12**| Blood Request Review & Approval | `PUT /api/resources/blood-bank/approve/:id` | **PASS** | Status updated to 'Approved'; stock NOT decremented prematurely |
-| **13**| Transfusion Fulfillment | `PUT /api/resources/blood-bank/fulfill/:id` | **PASS** | Fulfilled request atomically, issued units |
-| **14**| Stock Decrement Verification | `GET /api/resources/blood-bank/inventory` | **PASS** | Confirmed physical inventory decremented exactly by requested units |
-| **15**| Nurse Inpatient Roster | `GET /api/staff/nurse/assigned-patients` | **PASS** | Retrieved active ward inpatients with bed assignment metadata |
-| **16**| Routine Vitals Logging | `POST /api/staff/nurse/vitals` | **PASS** | Logged follow-up temperature, pulse, respiration, and BP |
-| **17**| Nursing Care Notes | `POST /api/staff/nurse/notes` | **PASS** | Documented clinical care notes with nurse timestamp |
-| **18**| High-Acuity Patient Monitor | `GET /api/staff/nurse/emergency-monitor` | **PASS** | Telemetry feed returned real-time acuity and vitals indicators |
-| **19**| Emergency Case Discharge | `POST /api/emergency/discharge/:id` | **PASS** | Generated clinical summary, closed emergency encounter |
-| **20**| Automatic Bed Release | `GET /api/admin/beds` | **PASS** | Confirmed bed automatically transitioned to 'Cleaning' for turnover |
+### 3. Assertions Covered by `test-e2e.js` (63 Total)
 
-### Concurrency & Data Integrity Tests
-- **Bed Race Condition Prevention**: Handled via `SELECT ... FOR UPDATE` row locks; concurrent duplicate attempts return HTTP 409 Conflict.
-- **Consultation to EMR Auto-Sync**: Consultation diagnoses automatically synchronized into `MEDICAL_RECORD` without record duplication.
-- **Lab Priority Integrity**: `LAB_REQUEST.priority` validated across all levels (`Normal`, `Urgent`, `Emergency`).
-
+1. **Section 0 — Health Check (1 assertion)**:
+   - `GET /health` returns HTTP 200 `{ status: 'ok' }`.
+2. **Section 1 — Security: Authentication & RBAC (16 assertions)**:
+   - Rejects wrong password (`401`), legacy `'password'` (`401`), `'admin123'` (`401`), `'hash_admin1'` (`401`), and unauthenticated `/api/admin/overview` (`401`).
+   - Authenticates Admin, Receptionist, Doctor 1, Doctor 2, Lab Technician, Pharmacist, and Nurse using bcrypt hashes.
+   - Enforces RBAC `403` blocks across Pharmacist, Lab Technician, and Receptionist on restricted endpoints.
+3. **Section 2 — Normal Patient Flow & Date Serialization (14 assertions)**:
+   - Receptionist registers patient with 1NF allergies (`PATIENT_ALLERGY`).
+   - Patient logs in and books an appointment on `futureDate` (`+14 days`) via `sp_book_appointment`.
+   - Verifies `GET /api/patient/appointments` returns exact `YYYY-MM-DD` `appointment_date` (via `dateStrings: ['DATE']`) and derives `department_name = 'Cardiology'`.
+   - Rejects duplicate slot booking (`409`).
+   - Doctor confirms appointment, blocks cross-doctor consultation (`403`) and history access (`403`), records consultation + `MEDICAL_RECORD` + `ADMISSION_REQUEST`, writes 3NF prescription, orders urgent lab test, Lab Tech uploads structured report, Receptionist generates invoice (`sp_generate_bill`), and records partial (`Partial`) + final (`Paid`) payments.
+4. **Section 2b — Receptionist Appointment Workflow Edges (5 assertions)**:
+   - Receptionist books a second appointment slot.
+   - Rescheduling to an already-taken slot returns `409 Conflict` and rolls back the cancellation of the original appointment.
+   - Rescheduling to a free slot succeeds (`201`) inside a transaction using `sp_book_appointment`.
+   - Cancelling the rescheduled appointment returns `200` (`status: 'Cancelled'`).
+   - Re-booking the cancelled slot succeeds (`201`), proving cancellation freed the active slot.
+   - Rescheduling a `Completed` appointment is blocked with `409 Conflict`.
+5. **Section 3 — Pharmacy Workflow (3 assertions)**:
+   - Pharmacist dispenses prescription in FEFO batch transaction (`200`), blocks re-dispensing (`409`), and rejects insufficient non-expired stock on Prescription #4 (`409`).
+6. **Section 4 — Admission, Bed Turnover & Inpatient Discharge (5 assertions)**:
+   - Nurse views pending `ADMISSION_REQUEST`, blocks assigning an `Occupied` bed (`409`), assigns an `Available` bed (`bed_id=5`), discharges inpatient to `Cleaning`, and marks bed `Available`.
+7. **Section 5 — Emergency Workflow, Ambulance Dispatch & Priority Engine (7 assertions)**:
+   - Admin dispatches ambulance (`EMERGENCY_CASE` + `AMBULANCE_DISPATCH`), Nurse records P1 triage, Priority Engine recommends Cardiology doctor & bed, Nurse allocates resources (`200`), blocks duplicate bed allocation (`409`), blocks unassigned doctor treatment (`403`), and logs assigned doctor treatment (`201`).
+8. **Section 6 — Blood Bank Workflow & Emergency Discharge (6 assertions)**:
+   - Doctor creates `Pending` blood request (`201`), blocks unapproved fulfillment (`409`), Admin approves (`200`) and fulfills (`200`), Doctor discharges emergency case (`200`), and Admin releases ambulance (`200`).
+9. **Section 7 — Admin Staff Creation (4 assertions)**:
+   - Blocks non-admin (`Receptionist`) from `POST /api/admin/staff` (`403`).
+   - Admin creates `Nurse` (`USER` + `STAFF` in one transaction, `201`).
+   - Rejects duplicate staff email with `409 Conflict`.
+   - Newly created staff member logs in with bcrypt password (`200`).

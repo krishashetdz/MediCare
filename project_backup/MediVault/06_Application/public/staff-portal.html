@@ -288,7 +288,7 @@
             (userRole === 'Lab Technician' ? '<button class="role-tab active" data-view="lab-queue"><i class="fa-solid fa-flask me-1"></i>Test Queue</button><button class="role-tab" data-view="lab-completed"><i class="fa-solid fa-check-double me-1"></i>Completed</button>' : '') +
             (userRole === 'Pharmacist' ? '<button class="role-tab active" data-view="pharma-queue"><i class="fa-solid fa-pills me-1"></i>Prescription Queue</button><button class="role-tab" data-view="pharma-inventory"><i class="fa-solid fa-boxes-stacked me-1"></i>Inventory</button>' : '') +
             (userRole === 'Receptionist' ? '<button class="role-tab active" data-view="recept-billing" data-testid="reception-appointments-tab">Appointments & billing</button><button class="role-tab" data-view="recept-register">Register patient</button><button class="role-tab" data-view="recept-booking">Quick booking</button>' : '') +
-            (userRole === 'Admin' ? '<button class="role-tab active" data-view="nurse-patients"><i class="fa-solid fa-bed-pulse me-1"></i>Nurse Station</button><button class="role-tab" data-view="recept-register"><i class="fa-solid fa-user-plus me-1"></i>Register Patient</button><button class="role-tab" data-view="recept-booking"><i class="fa-solid fa-calendar-plus me-1"></i>Quick Booking</button><button class="role-tab" data-view="nurse"><i class="fa-solid fa-bed me-1"></i>Ward Board</button><button class="role-tab" data-view="lab-queue"><i class="fa-solid fa-flask me-1"></i>Lab Queue</button><button class="role-tab" data-view="pharma-queue"><i class="fa-solid fa-pills me-1"></i>Pharmacy Queue</button>' : '');
+            (userRole === 'Admin' ? '<button class="role-tab active" data-view="nurse-patients"><i class="fa-solid fa-bed-pulse me-1"></i>Nurse Station</button><button class="role-tab" data-view="recept-billing"><i class="fa-solid fa-calendar-check me-1"></i>Appointments & billing</button><button class="role-tab" data-view="recept-register"><i class="fa-solid fa-user-plus me-1"></i>Register Patient</button><button class="role-tab" data-view="recept-booking"><i class="fa-solid fa-calendar-plus me-1"></i>Quick Booking</button><button class="role-tab" data-view="nurse"><i class="fa-solid fa-bed me-1"></i>Ward Board</button><button class="role-tab" data-view="lab-queue"><i class="fa-solid fa-flask me-1"></i>Lab Queue</button><button class="role-tab" data-view="pharma-queue"><i class="fa-solid fa-pills me-1"></i>Pharmacy Queue</button>' : '');
 
         ctx.content.insertBefore(tabs, ctx.content.firstChild);
 
@@ -1043,10 +1043,10 @@
             columns: ['Medicine', 'Manufacturer', 'Price', 'Stock', 'Expiry'],
             rows: inventory.map(function (med) {
                 const stockBadge = med.stock_qty < 20 ? '<span class="mv-badge mv-badge-danger">Low</span>' : med.stock_qty;
-                const expiry = new Date(med.expiry_date);
+                const expiry = MV.fmt.parseDate(med.expiry_date);
                 const now = new Date();
                 const daysDiff = Math.floor((expiry - now) / (1000 * 60 * 60 * 24));
-                const expiryBadge = daysDiff < 30 ? '<span class="mv-badge mv-badge-warning">Expiring</span>' : expiry.toLocaleDateString();
+                const expiryBadge = daysDiff < 30 ? '<span class="mv-badge mv-badge-warning">Expiring</span>' : MV.fmt.dateIndian(med.expiry_date);
 
                 return [
                     MV.esc(med.medicine_name),

@@ -26,14 +26,18 @@ router.post('/book-appointment', async (req, res) => {
         try {
             const mongo = getMongo();
             await mongo.collection('audit_log').insertOne({
-                event: 'appointment_booked',
-                patient_id: req.session.user.id,
-                patient_name: req.session.user.name,
-                doctor_id: Number(doctor_id),
-                department_id: department_id ? Number(department_id) : null,
-                appointment_date,
-                appointment_time,
-                booked_at: new Date()
+                user_id: req.session.user.id,
+                action: 'BOOK appointment',
+                table_affected: 'APPOINTMENT',
+                details: {
+                    patient_id: req.session.user.id,
+                    patient_name: req.session.user.name,
+                    doctor_id: Number(doctor_id),
+                    department_id: department_id ? Number(department_id) : null,
+                    appointment_date,
+                    appointment_time
+                },
+                timestamp: new Date()
             });
         } catch (mongoErr) {
             console.warn('MongoDB audit_log write failed (non-fatal):', mongoErr.message);

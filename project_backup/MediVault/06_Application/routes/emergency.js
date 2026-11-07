@@ -283,12 +283,15 @@ router.post('/register', requireRole('Admin', 'Receptionist', 'Nurse'), async (r
         try {
             const mongo = getMongo();
             await mongo.collection('audit_log').insertOne({
-                event: 'emergency_patient_registered',
-                case_id: newCaseId,
-                emg_number: emgNumber,
-                registered_by: req.session.user.id,
-                arrival_method,
-                priority: triage_priority,
+                user_id: req.session.user.id,
+                action: 'REGISTER emergency patient',
+                table_affected: 'EMERGENCY_CASE',
+                details: {
+                    case_id: newCaseId,
+                    emg_number: emgNumber,
+                    arrival_method,
+                    priority: triage_priority
+                },
                 timestamp: new Date()
             });
         } catch (_) {}

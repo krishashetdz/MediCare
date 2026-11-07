@@ -1,66 +1,80 @@
 # Component Diagram
-## Software Architecture & Module Boundaries
+## MediVault / MediCare Application Architecture
 
 ```mermaid
 graph TD
-    subgraph ClientLayer [Presentation Tier - Single Page & Modular HTML/JS Views]
-        Shell["mv-shell.js (Navigation, Shell, Active Tab Controller)"]
-        CoreJS["mv-core.js (API Client, Session State, Modals)"]
-        Views["public/*.html (Emergency, Inpatient, Pharmacy, Diagnostics, Portals)"]
-        Themes["medivault-restyle.css & clinical-record.css (Semantic Theme System)"]
+    subgraph Frontend [Browser Client - Vanilla HTML5 / JS / Bootstrap 5]
+        Shell["public/assets/js/mv-shell.js (Role Navigation Shell)"]
+        Core["public/assets/js/mv-core.js (API Wrapper, Local Date Parser, DataTable)"]
+        ReceptJS["public/assets/js/reception-billing.js (Receptionist Appointments, Billing, Reschedule & Cancel)"]
+        Pages["public/*.html (Role Dashboards, Emergency Ward, Staff Portal, Admin Staff/Doctors)"]
     end
 
-    subgraph ServiceLayer [Express.js Application Engine]
-        Server["server.js (HTTP / Middleware Setup)"]
-        AuthModule["middleware/auth.js (Session & RBAC Protection)"]
+    subgraph Backend [Node.js / Express Server - server.js]
+        AuthMW["middleware/auth.js (requireAuth, requireRole)"]
+        NotifSvc["services/notificationService.js (MySQL NOTIFICATION + Mongo notification_log)"]
 
-        subgraph RESTControllers [REST Routers]
-            CtrlEmergency["routes/emergency.js (Priority Engine, Queue, Triage)"]
-            CtrlDoctor["routes/doctor.js (Consultations, EMR, Prescriptions)"]
-            CtrlStaff["routes/staff.js (Nurse Workspace, Lab Intake, Pharmacy)"]
-            CtrlResources["routes/resources.js (Blood Bank, Ambulance Telematics)"]
-            CtrlBilling["routes/billing.js (Invoice Reconciliation & Payments)"]
-            CtrlPatient["routes/patient.js (Self-service Portal & Scheduling)"]
-            CtrlAdmin["routes/admin.js (Hospital Governance & Operations)"]
+        subgraph Routers [Express Route Modules]
+            R_Auth["routes/auth.js (/api/auth)"]
+            R_Admin["routes/admin.js (/api/admin)"]
+            R_Res["routes/resources.js (/api/admin/blood-bank & /api/admin/ambulance)"]
+            R_Doc["routes/doctor.js (/api/doctor)"]
+            R_Pat["routes/patient.js (/api/patient)"]
+            R_Staff["routes/staff.js (/api/staff/nurse, lab-tech, pharmacist, receptionist)"]
+            R_Bill["routes/billing.js (/api/billing)"]
+            R_Emg["routes/emergency.js (/api/emergency)"]
+            R_Prof["routes/profile.js (/api/profile)"]
         end
-
-        NotifService["services/notificationService.js (Role & User Notification Hub)"]
     end
 
-    subgraph PersistenceLayer [Data Layer]
-        MySQLDriver["mysql2/promise Connection Pool (config/db.js)"]
-        MongoDriver["mongodb Client (config/db.js)"]
+    subgraph DataLayer [Dual Database Layer - config/db.js]
+        MySQLPool["mysql2/promise Pool (dateStrings: ['DATE']) -> MariaDB/MySQL medivault"]
+        MongoConn["mongodb Client -> MongoDB medivault (lab_reports_raw, audit_log, ambulance_dispatch_log, notification_log)"]
     end
 
-    Views --> Shell
-    Views --> CoreJS
-    Shell --> CoreJS
-    CoreJS --> Server
+    Pages --> Shell
+    Pages --> Core
+    Pages --> ReceptJS
+    Core --> R_Auth
+    Core --> R_Admin
+    Core --> R_Res
+    Core --> R_Doc
+    Core --> R_Pat
+    Core --> R_Staff
+    Core --> R_Bill
+    Core --> R_Emg
+    Core --> R_Prof
 
-    Server --> AuthModule
-    AuthModule --> CtrlEmergency
-    AuthModule --> CtrlDoctor
-    AuthModule --> CtrlStaff
-    AuthModule --> CtrlResources
-    AuthModule --> CtrlBilling
-    AuthModule --> CtrlPatient
-    AuthModule --> CtrlAdmin
+    R_Admin --> AuthMW
+    R_Res --> AuthMW
+    R_Doc --> AuthMW
+    R_Pat --> AuthMW
+    R_Staff --> AuthMW
+    R_Bill --> AuthMW
+    R_Emg --> AuthMW
+    R_Prof --> AuthMW
 
-    CtrlEmergency --> NotifService
-    CtrlStaff --> NotifService
-    CtrlResources --> NotifService
+    R_Res --> NotifSvc
+    R_Staff --> NotifSvc
+    R_Bill --> NotifSvc
+    R_Emg --> NotifSvc
 
-    CtrlEmergency --> MySQLDriver
-    CtrlDoctor --> MySQLDriver
-    CtrlStaff --> MySQLDriver
-    CtrlResources --> MySQLDriver
-    CtrlBilling --> MySQLDriver
-    CtrlPatient --> MySQLDriver
-    CtrlAdmin --> MySQLDriver
+    R_Auth --> MySQLPool
+    R_Admin --> MySQLPool
+    R_Res --> MySQLPool
+    R_Doc --> MySQLPool
+    R_Pat --> MySQLPool
+    R_Staff --> MySQLPool
+    R_Bill --> MySQLPool
+    R_Emg --> MySQLPool
+    R_Prof --> MySQLPool
 
-    CtrlEmergency -.-> MongoDriver
-    CtrlDoctor -.-> MongoDriver
-    CtrlStaff -.-> MongoDriver
-    CtrlResources -.-> MongoDriver
+    R_Admin -.-> MongoConn
+    R_Res -.-> MongoConn
+    R_Doc -.-> MongoConn
+    R_Pat -.-> MongoConn
+    R_Staff -.-> MongoConn
+    R_Bill -.-> MongoConn
+    R_Emg -.-> MongoConn
+    NotifSvc -.-> MongoConn
 ```
-

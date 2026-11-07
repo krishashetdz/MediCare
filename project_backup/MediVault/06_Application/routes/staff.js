@@ -1002,18 +1002,176 @@ router.post('/receptionist/generate-bill', requireRole('Receptionist', 'Admin'),
     }
 });
 
-// Receptionist appointment context for the procedure-backed billing action.
+// Receptionist appointment context for the procedure-backed billing, cancel & reschedule actions.
 router.get('/receptionist/appointments', requireRole('Receptionist', 'Admin'), async (req, res) => {
     const [rows] = await mysqlPool.query(`
         SELECT a.appointment_id, a.patient_id, up.name AS patient_name,
+               a.doctor_id, doc.department_id,
                ud.name AS doctor_name, a.appointment_date, a.appointment_time,
                a.status, c.consultation_id,
                (SELECT MAX(b.bill_id) FROM BILL b WHERE b.appointment_id=a.appointment_id) AS bill_id
         FROM APPOINTMENT a JOIN \`USER\` up ON up.user_id=a.patient_id
+        JOIN DOCTOR doc ON doc.doctor_id=a.doctor_id
         JOIN \`USER\` ud ON ud.user_id=a.doctor_id
         LEFT JOIN CONSULTATION c ON c.appointment_id=a.appointment_id
         ORDER BY a.appointment_date DESC, a.appointment_time DESC`);
     res.json(rows);
+});
+
+// Receptionist: Cancel an active appointment (frees the active slot via active_slot_date generated column)
+router.post('/receptionist/appointments/:id/cancel', requireRole('Receptionist', 'Admin'), async (req, res) => {
+    const appointmentId = Number(req.params.id);
+    if (!Number.isSafeInteger(appointmentId) || appointmentId < 1) {
+        return res.status(400).json({ error: 'Invalid appointment ID' });
+    }
+    const conn = await mysqlPool.getConnection();
+    try {
+        await conn.beginTransaction();
+        const [[appt]] = await conn.query(
+            'SELECT appointment_id, patient_id, doctor_id, appointment_date, appointment_time, status FROM APPOINTMENT WHERE appointment_id = ? FOR UPDATE',
+            [appointmentId]
+        );
+        if (!appt) {
+            await conn.rollback();
+            return res.status(404).json({ error: 'Appointment not found' });
+        }
+        if (appt.status === 'Completed') {
+            await conn.rollback();
+            return res.status(409).json({ error: 'Completed appointments cannot be cancelled' });
+        }
+        if (appt.status === 'Cancelled') {
+            await conn.rollback();
+            return res.status(409).json({ error: 'Appointment is already cancelled' });
+        }
+
+        await conn.query(
+            "UPDATE APPOINTMENT SET status = 'Cancelled' WHERE appointment_id = ?",
+            [appointmentId]
+        );
+        await conn.commit();
+
+        try {
+            await getMongo().collection('audit_log').insertOne({
+                user_id: req.session.user.id,
+                action: 'CANCEL appointment',
+                table_affected: 'APPOINTMENT',
+                details: {
+                    appointment_id: appointmentId,
+                    patient_id: appt.patient_id,
+                    doctor_id: appt.doctor_id,
+                    appointment_date: appt.appointment_date,
+                    appointment_time: appt.appointment_time
+                },
+                timestamp: new Date()
+            });
+        } catch (_) {}
+
+        res.json({ message: 'Appointment cancelled', appointment_id: appointmentId, status: 'Cancelled' });
+    } catch (err) {
+        await conn.rollback();
+        res.status(500).json({ error: err.sqlMessage || err.message || 'Could not cancel appointment' });
+    } finally {
+        conn.release();
+    }
+});
+
+// Receptionist: Reschedule an appointment (blocks Completed, cancels old slot, reuses sp_book_appointment inside a transaction)
+router.post('/receptionist/appointments/:id/reschedule', requireRole('Receptionist', 'Admin'), async (req, res) => {
+    const appointmentId = Number(req.params.id);
+    const { appointment_date, appointment_time, doctor_id } = req.body;
+    if (!Number.isSafeInteger(appointmentId) || appointmentId < 1) {
+        return res.status(400).json({ error: 'Invalid appointment ID' });
+    }
+    if (!appointment_date || !appointment_time) {
+        return res.status(400).json({ error: 'appointment_date and appointment_time are required' });
+    }
+
+    const conn = await mysqlPool.getConnection();
+    try {
+        await conn.beginTransaction();
+        const [[appt]] = await conn.query(
+            `SELECT a.appointment_id, a.patient_id, a.doctor_id, d.department_id,
+                    a.appointment_date, a.appointment_time, a.status
+             FROM APPOINTMENT a
+             JOIN DOCTOR d ON a.doctor_id = d.doctor_id
+             WHERE a.appointment_id = ?
+             FOR UPDATE`,
+            [appointmentId]
+        );
+        if (!appt) {
+            await conn.rollback();
+            return res.status(404).json({ error: 'Appointment not found' });
+        }
+        if (appt.status === 'Completed') {
+            await conn.rollback();
+            return res.status(409).json({ error: 'Completed appointments cannot be rescheduled' });
+        }
+        if (appt.status === 'Cancelled') {
+            await conn.rollback();
+            return res.status(409).json({ error: 'Cancelled appointments cannot be rescheduled' });
+        }
+
+        const targetDoctorId = doctor_id ? Number(doctor_id) : appt.doctor_id;
+
+        // Cancel the existing appointment first so its active slot is freed
+        await conn.query(
+            "UPDATE APPOINTMENT SET status = 'Cancelled' WHERE appointment_id = ?",
+            [appointmentId]
+        );
+
+        // Reuse sp_book_appointment for the new slot inside the same connection/transaction.
+        // If sp_book_appointment fails (e.g. slot already taken), its handler rolls back the entire transaction
+        // including the status = 'Cancelled' update on the original appointment!
+        await conn.query(
+            'CALL sp_book_appointment(?, ?, ?, ?, ?, ?)',
+            [appt.patient_id, targetDoctorId, appt.department_id, appointment_date, appointment_time, req.session.user.id]
+        );
+
+        const [[newAppt]] = await conn.query(
+            `SELECT appointment_id, patient_id, doctor_id, appointment_date, appointment_time, status
+             FROM APPOINTMENT
+             WHERE patient_id = ? AND doctor_id = ? AND appointment_date = ? AND appointment_time = ?
+               AND status IN ('Scheduled', 'Confirmed', 'Checked In')
+             ORDER BY appointment_id DESC LIMIT 1`,
+            [appt.patient_id, targetDoctorId, appointment_date, appointment_time]
+        );
+
+        await conn.commit();
+
+        try {
+            await getMongo().collection('audit_log').insertOne({
+                user_id: req.session.user.id,
+                action: 'RESCHEDULE appointment',
+                table_affected: 'APPOINTMENT',
+                details: {
+                    old_appointment_id: appointmentId,
+                    new_appointment_id: newAppt ? newAppt.appointment_id : null,
+                    patient_id: appt.patient_id,
+                    doctor_id: targetDoctorId,
+                    old_date: appt.appointment_date,
+                    old_time: appt.appointment_time,
+                    new_date: appointment_date,
+                    new_time: appointment_time
+                },
+                timestamp: new Date()
+            });
+        } catch (_) {}
+
+        res.status(201).json({
+            message: 'Appointment rescheduled',
+            old_appointment_id: appointmentId,
+            appointment_id: newAppt ? newAppt.appointment_id : null,
+            appointment: newAppt || null
+        });
+    } catch (err) {
+        await conn.rollback();
+        if (err && (err.code === 'ER_DUP_ENTRY' || (err.sqlMessage && err.sqlMessage.includes('already booked')))) {
+            return res.status(409).json({ error: err.sqlMessage || 'Selected slot is already booked for this doctor' });
+        }
+        res.status(409).json({ error: err.sqlMessage || err.message || 'Could not reschedule appointment' });
+    } finally {
+        conn.release();
+    }
 });
 
 // Pharmacist notifications (low stock alerts) -- written by trg_low_stock_alert

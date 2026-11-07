@@ -159,7 +159,7 @@
 
         try {
             allAppointments = await MV.api.get('/api/patient/appointments');
-            const today = new Date().toISOString().slice(0, 10);
+            const today = MV.fmt.isoDate();
 
             const upcoming = allAppointments.filter(function (a) {
                 return (a.status === 'Scheduled' || a.status === 'Confirmed') && a.appointment_date >= today;
@@ -373,7 +373,7 @@
         container.innerHTML = '<h6 class="mb-3">3. Choose Appointment Date</h6>' +
             '<div class="calendar-grid">' +
               days.map(function (d) {
-                  const iso = d.toISOString().slice(0, 10);
+                  const iso = MV.fmt.isoDate(d);
                   const sel = iso === bookingData.appointment_date ? 'selected' : '';
                   return '<div class="calendar-day ' + sel + '" onclick="selectDate(\'' + iso + '\')">' +
                       '<span>' + d.getDate() + '</span>' +

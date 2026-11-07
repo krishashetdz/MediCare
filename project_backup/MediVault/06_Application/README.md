@@ -1,80 +1,78 @@
-# MediCare – Smart Hospital & Emergency Management System
+# MediVault / MediCare – Hospital & Emergency Management System
 
-MediCare is an integrated, enterprise-grade Hospital and Emergency Management Platform. It connects general outpatient/inpatient workflows with a dedicated Emergency Ward powered by the **Signature Emergency Priority Engine**, dynamic priority queuing, concurrency-safe bed allocation, and dual-database persistence (MariaDB/MySQL + MongoDB).
-
----
-
-## 🏥 Key Systems & Capabilities
-
-1. **Emergency Ward & Priority Engine**:
-   - Real-time emergency dashboard with active, critical, and bed KPIs.
-   - Dynamic priority queue (P1 Critical, P2 High, P3 Moderate, P4 Low) scored by clinical acuity and waiting time.
-   - **Signature Emergency Priority Engine**: Rule-based resource allocation evaluating patient vitals, complaints, doctor shift schedules, active workloads, and bed availability to yield actionable clinical recommendations.
-   - Concurrency-safe bed and doctor allocation using `SELECT ... FOR UPDATE` database row-level locking.
-   - Real-time clinical treatment logging and emergency outcome management (ICU/Ward admission or discharge).
-
-2. **Inpatient & Bed Management**:
-   - Ward occupancy map for Emergency, General, ICU, and Pediatric wards.
-   - Atomic bed assignment, transfer, and automatic release to `'Cleaning'` status upon patient discharge.
-
-3. **Blood Bank Transfusion Lifecycle**:
-   - Real-time 8 blood group inventory gauges.
-   - End-to-end request workflow: `Pending` ➔ `Approved` / `Rejected` ➔ `Fulfilled`.
-   - Inventory units are deducted **only** upon actual fulfillment and issuance.
-
-4. **Ambulance Fleet & Emergency Integration**:
-   - Vehicle fleet tracking and driver assignment.
-   - Persistent dispatch records linked to emergency cases with audit telematics logged to MongoDB.
-
-5. **Nurse & Clinical Staff Workspace**:
-   - Ward-wise assigned inpatient roster.
-   - Routine vital sign recording and nursing care notes.
-   - Live high-acuity emergency telemetry monitor.
-
-6. **Outpatient, Diagnostics, Pharmacy & Billing**:
-   - Patient registration, appointment scheduling with collision prevention (`sp_book_appointment`).
-   - Doctor clinical consultations with automatic synchronization to unified patient `MEDICAL_RECORD`.
-   - Diagnostic laboratory test orders with priority levels (`Normal`, `Urgent`, `Emergency`).
-   - Pharmacy dispensing queue with automatic stock decrement.
-   - Unified invoicing for room, consultations, medications, tests, and emergency services.
+MediVault (MediCare) is a full-stack Hospital and Emergency Management DBMS application built with **Node.js, Express, MySQL/MariaDB (3NF), MongoDB, and Vanilla HTML/JS/Bootstrap 5**.
 
 ---
 
-## 📚 Complete Project Documentation
+## Key Capabilities & Deliberate Design Decisions
 
-All system documentation and architectural diagrams are located in the `documentation/` directory:
-
-- [System Architecture](documentation/ARCHITECTURE.md)
-- [Database Schema & Dictionary](documentation/DATABASE.md)
-- [REST API Reference](documentation/API_DOCUMENTATION.md)
-- [Entity-Relationship (ER) Diagram](documentation/ER_DIAGRAM.md)
-- [Data Flow Diagram Level 0](documentation/DFD_LEVEL_0.md)
-- [Data Flow Diagram Level 1](documentation/DFD_LEVEL_1.md)
-- [Data Flow Diagram Level 2 (Emergency Subsystem)](documentation/DFD_LEVEL_2.md)
-- [Use Case Diagram](documentation/USE_CASE_DIAGRAM.md)
-- [Sequence Diagrams](documentation/SEQUENCE_DIAGRAMS.md)
-- [Activity Diagrams](documentation/ACTIVITY_DIAGRAMS.md)
-- [Component Diagram](documentation/COMPONENT_DIAGRAM.md)
-- [Deployment Diagram](documentation/DEPLOYMENT_DIAGRAM.md)
-- [Installation Guide](documentation/INSTALLATION.md)
-- [User Roles & Access Control Matrix](documentation/USER_ROLES.md)
-- [Testing & Verification Report (100% Pass)](documentation/TESTING_REPORT.md)
-- [Implementation Status Report](documentation/IMPLEMENTATION_STATUS_REPORT.md)
+1. **Normalized 3NF Relational Schema (`db/schema.sql` — 34 Base Tables + 11 Views)**:
+   - Every base table uses a single-column primary key so **2NF holds by construction**, and all transitive dependencies are removed (**3NF**): `WARD` (ward metadata), `PATIENT_ALLERGY` (1NF atomic allergies), `MEDICINE_BATCH` + `DISPENSING_RECORD`/`DISPENSING_ITEM` (FEFO batch dispensing), `PAYMENT` (partial & full payment receipts), `ADMISSION_REQUEST`, `EMERGENCY_DOCTOR_ASSIGNMENT`, `EMERGENCY_BED_ASSIGNMENT`, `AMBULANCE_DISPATCH`, and `EMERGENCY_SEQUENCE`.
+   - `EMERGENCY_CASE.triage_priority` is a deliberate current-state denormalization for fast ER queue sorting, while full history is preserved in `TRIAGE_ASSESSMENT` and `EMERGENCY_PRIORITY_LOG`.
+   - **Receptionist** covers billing (`sp_generate_bill`, `PAYMENT`) and front-desk emergency registration alongside appointment booking/rescheduling/cancellation; **Nurse** covers clinical triage, priority engine execution, bed allocation, and inpatient care.
+2. **Timezone-Safe Date Handling**:
+   - `config/db.js` configures `dateStrings: ['DATE']` on the `mysql2` pool so MySQL `DATE` columns (`appointment_date`, `dob`, `shift_date`, `start_date`, `end_date`, `expiry_date`) serialize as `'YYYY-MM-DD'` strings across both `TZ=Asia/Kolkata` and `TZ=UTC`.
+3. **Hybrid MongoDB Persistence**:
+   - Stores structured diagnostic lab payloads (`lab_reports_raw`), consistent audit logs (`audit_log` with `{user_id, action, table_affected, details, timestamp}`), ambulance dispatch logs (`ambulance_dispatch_log`), and notification logs (`notification_log`).
 
 ---
 
-## 🚀 Running the Project
+## How to Run from Scratch
 
 ```bash
-# 1. Start MariaDB / MySQL on port 3306
-# 2. Run migrations
-mysql -u root medivault < migrations/emergency_schema.sql
-mysql -u root medivault < migrations/emergency_seed.sql
-
-# 3. Start Node.js application
 cd project_backup/MediVault/06_Application
-node server.js
 
-# 4. Open browser
-http://localhost:3000
+# 1. Create database and load schema.sql + seed.sql
+mysql -u root -e "DROP DATABASE IF EXISTS medivault; CREATE DATABASE medivault CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+mysql -u root medivault < db/schema.sql
+mysql -u root medivault < db/seed.sql
+
+# 2. Configure .env
+cp .env.example .env
+# Edit .env and replace SESSION_SECRET with a random string:
+# node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
+
+# 3. Install dependencies and start server
+npm install
+npm start
+
+# 4. Run end-to-end tests (under IST and UTC) and MongoDB verification
+TZ=Asia/Kolkata node test-e2e.js
+TZ=UTC node test-e2e.js
+node scripts/verify-mongo.js
 ```
+
+### Seed Login Credentials
+
+| Role | Email | Password |
+| :--- | :--- | :--- |
+| **Admin** | `admin@medivault.in` | `admin1` |
+| **Doctor (Cardiology)** | `sharma.doc@medivault.in` | `doc1` |
+| **Doctor (Orthopedics)** | `mehta.doc@medivault.in` | `doc2` |
+| **Doctor (General Medicine)** | `iyer.doc@medivault.in` | `doc3` |
+| **Doctor (Emergency Medicine)** | `bhosale.doc@medivault.in` | `doc4` |
+| **Nurse** | `kavita.joshi@medivault.in` | `staff1` |
+| **Lab Technician** | `arjun.pillai@medivault.in` | `staff2` |
+| **Pharmacist** | `neha.kapoor@medivault.in` | `staff3` |
+| **Receptionist** | `suresh.rao@medivault.in` | `staff4` |
+| **Patient** | `rahul.verma@gmail.com` | `pat1` |
+| **Patient** | `priya.nair@gmail.com` | `pat2` |
+
+---
+
+## Documentation Index (`documentation/`)
+
+- [Database Schema & Normalization (`DATABASE.md`)](documentation/DATABASE.md)
+- [Entity-Relationship Diagram (`ER_DIAGRAM.md`)](documentation/ER_DIAGRAM.md)
+- [DFD Level 0 (`DFD_LEVEL_0.md`)](documentation/DFD_LEVEL_0.md)
+- [DFD Level 1 (`DFD_LEVEL_1.md`)](documentation/DFD_LEVEL_1.md)
+- [DFD Level 2 (`DFD_LEVEL_2.md`)](documentation/DFD_LEVEL_2.md)
+- [Sequence Diagrams (`SEQUENCE_DIAGRAMS.md`)](documentation/SEQUENCE_DIAGRAMS.md)
+- [Activity Diagrams (`ACTIVITY_DIAGRAMS.md`)](documentation/ACTIVITY_DIAGRAMS.md)
+- [Component Diagram (`COMPONENT_DIAGRAM.md`)](documentation/COMPONENT_DIAGRAM.md)
+- [REST API Reference (`API_DOCUMENTATION.md`)](documentation/API_DOCUMENTATION.md)
+- [User Roles & Credentials (`USER_ROLES.md`)](documentation/USER_ROLES.md)
+- [Testing Report (`TESTING_REPORT.md`)](documentation/TESTING_REPORT.md)
+- [Implementation Status Report (`IMPLEMENTATION_STATUS_REPORT.md`)](documentation/IMPLEMENTATION_STATUS_REPORT.md)
+- [Installation Guide (`INSTALLATION.md`)](documentation/INSTALLATION.md)
+- [System Architecture (`ARCHITECTURE.md`)](documentation/ARCHITECTURE.md)

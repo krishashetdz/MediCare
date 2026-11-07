@@ -176,7 +176,7 @@
         try {
             schedule = await MV.api.get('/api/doctor/schedule');
 
-            const today = new Date().toISOString().slice(0, 10);
+            const today = MV.fmt.isoDate();
             const todayCount = schedule.filter(function (a) { return a.appointment_date && a.appointment_date.slice(0, 10) === today; }).length;
             const pendingCount = schedule.filter(function (a) { return a.status === 'Scheduled'; }).length;
             const confirmedCount = schedule.filter(function (a) { return a.status === 'Confirmed'; }).length;

@@ -14,12 +14,56 @@
 </head>
 <body>
 <div class="mv-layout" id="mvShell"></div>
+
+<!-- Add Staff Modal -->
+<div class="modal fade" id="addStaffModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title">Add Staff</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <form id="addStaffForm">
+          <div class="mb-3"><label class="form-label">Full Name</label><input type="text" class="form-control" name="name" required placeholder="Full name"></div>
+          <div class="mb-3"><label class="form-label">Email</label><input type="email" class="form-control" name="email" required placeholder="staff@medivault.in"></div>
+          <div class="mb-3"><label class="form-label">Phone</label><input type="tel" class="form-control" name="phone" placeholder="9876543210"></div>
+          <div class="mb-3"><label class="form-label">Password</label><input type="password" class="form-control" name="password" required placeholder="Temporary password"></div>
+          <div class="mb-3">
+            <label class="form-label">Role</label>
+            <select class="form-select" name="role" required>
+              <option value="">Select...</option>
+              <option value="Nurse">Nurse</option>
+              <option value="Lab Technician">Lab Technician</option>
+              <option value="Pharmacist">Pharmacist</option>
+              <option value="Receptionist">Receptionist</option>
+            </select>
+          </div>
+          <div class="mb-3"><label class="form-label">Department (optional)</label><select class="form-select" name="department_id"><option value="">None / General</option></select></div>
+          <div class="mb-3">
+            <label class="form-label">Shift</label>
+            <select class="form-select" name="shift">
+              <option value="Morning">Morning</option>
+              <option value="Evening">Evening</option>
+              <option value="Night">Night</option>
+            </select>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="mv-btn mv-btn-primary" id="saveStaff">Add Staff</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
 <script src="/assets/js/mv-core.js"></script>
 <script src="/assets/js/mv-shell.js"></script>
 <script>
 (function () {
     'use strict';
+    let addModal;
+    let table;
+
     (async function init() {
         const ctx = await MV.shell.mount({ roles: ['Admin'], title: 'Staff Management', subtitle: 'All hospital staff by role' });
 
@@ -32,6 +76,7 @@
               '<option value="Pharmacist">Pharmacists</option>' +
               '<option value="Receptionist">Receptionists</option>' +
             '</select>' +
+            '<button type="button" class="mv-btn mv-btn-primary" id="addStaffBtn"><i class="fas fa-plus"></i><span>Add Staff</span></button>' +
             '<button type="button" class="mv-btn mv-btn-outline" id="refreshBtn"><i class="fas fa-sync-alt"></i><span>Refresh</span></button>';
 
         ctx.content.innerHTML =
@@ -41,12 +86,16 @@
             '</div>' +
             '<div class="mv-footer">MediCare - Hospital Management System</div>';
 
-        document.getElementById('refreshBtn').addEventListener('click', function () { table.reload(); });
+        addModal = new bootstrap.Modal(document.getElementById('addStaffModal'));
+        document.getElementById('addStaffBtn').addEventListener('click', openAddModal);
+        document.getElementById('saveStaff').addEventListener('click', saveStaff);
+        document.getElementById('refreshBtn').addEventListener('click', function () { table.reload(); loadStaffStats(); });
         document.getElementById('roleFilter').addEventListener('change', function () { table.reload(); });
 
         loadStaffStats();
+        loadDepartments();
 
-        const table = new MV.DataTable(document.getElementById('staffSlot'), {
+        table = new MV.DataTable(document.getElementById('staffSlot'), {
             columns: [
                 { key: 'user_id',    label: 'ID' },
                 { key: 'name',       label: 'Name' },
@@ -65,6 +114,42 @@
             searchPlaceholder: 'Search staff...'
         });
     })();
+
+    async function loadDepartments() {
+        try {
+            const rows = await MV.api.get('/api/admin/departments');
+            const sel = document.querySelector('#addStaffForm [name="department_id"]');
+            if (!sel) return;
+            rows.forEach(function (d) {
+                const opt = document.createElement('option');
+                opt.value = d.department_id;
+                opt.textContent = d.department_name;
+                sel.appendChild(opt);
+            });
+        } catch (err) { /* non-fatal */ }
+    }
+
+    function openAddModal() {
+        document.getElementById('addStaffForm').reset();
+        addModal.show();
+    }
+
+    async function saveStaff() {
+        const form = document.getElementById('addStaffForm');
+        if (!form.checkValidity()) { form.reportValidity(); return; }
+        const btn = document.getElementById('saveStaff');
+        const restore = MV.pending(btn, 'Saving...');
+        const data = Object.fromEntries(new FormData(form));
+        try {
+            await MV.api.post('/api/admin/staff', data);
+            MV.toast.success('Staff member added');
+            addModal.hide();
+            table.reload();
+            loadStaffStats();
+        } catch (err) {
+            MV.toast.error('Failed to add staff', err.message);
+        } finally { restore(); }
+    }
 
     async function loadStaffStats() {
         try {

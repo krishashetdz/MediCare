@@ -233,7 +233,7 @@
                 '<tbody>' +
                   rows.map(function (m) {
                       const low = m.stock_qty < 20;
-                      const exp = m.expiry_date ? new Date(m.expiry_date) : null;
+                      const exp = m.expiry_date ? MV.fmt.parseDate(m.expiry_date) : null;
                       const expiring = exp && (exp - now) < thirtyDays && exp > now;
                       const expired = exp && exp <= now;
 

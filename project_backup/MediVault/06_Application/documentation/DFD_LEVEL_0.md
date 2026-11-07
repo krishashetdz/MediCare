@@ -1,37 +1,36 @@
 # Data Flow Diagram (DFD) – Level 0
-## Context Level Diagram: MediCare Smart Hospital & Emergency Management System
+## Context Level Diagram: MediVault / MediCare Hospital Management System
 
 ```mermaid
 graph TD
     Patient(["Patient"])
     Doctor(["Doctor"])
-    Nurse(["Nurse / Staff"])
+    Nurse(["Nurse (Inpatient & ER Triage)"])
+    Receptionist(["Receptionist (Front Desk, Billing & ER Intake)"])
     LabTech(["Lab Technician"])
     Pharmacist(["Pharmacist"])
     Admin(["System Administrator"])
-    AmbulanceDriver(["Ambulance Driver"])
 
-    System[["0.0 MediCare System Engine"]]
+    System[["0.0 MediVault / MediCare Hospital & Emergency System"]]
 
-    Patient -->|"Registration, Appt Booking, Symptoms, Payments"| System
-    System -->|"Appointments, Prescriptions, Lab Reports, Invoices"| Patient
+    Patient -->|"Self-Service Booking, Cancellations, Profile Updates"| System
+    System -->|"Appointments, Prescriptions, Lab Reports, Bills & Receipts"| Patient
 
-    Doctor -->|"Availability, Diagnoses, Prescriptions, Lab Orders, Treatment Logs"| System
-    System -->|"Clinical Worklists, Emergency Alerts, Patient History"| Doctor
+    Doctor -->|"Appointment Confirmations, Consultations, Prescriptions, Lab Orders, Admission Requests, ER Treatments"| System
+    System -->|"Schedules, Patient Clinical History, Lab Results, ER Case Alerts"| Doctor
 
-    Nurse -->|"Vitals, Nursing Notes, Triage Assessments, Bed Transfers"| System
-    System -->|"Inpatient Rosters, Emergency Acuity Feeds, Task Notifications"| Nurse
+    Nurse -->|"ER Triage Vitals, Priority Engine Allocation, Inpatient Bed Assignment, Vitals, Care Notes, Bed Turnover"| System
+    System -->|"Pending Admission Requests, Inpatient Roster, ER Queue & Telemetry"| Nurse
 
-    LabTech -->|"Lab Test Results, Specimen Approvals"| System
-    System -->|"Diagnostic Orders with Priority Flags"| LabTech
+    Receptionist -->|"Patient Registration, Appointment Book/Reschedule/Cancel, ER Registration, Bill Generation, Payments, Ambulance Dispatch"| System
+    System -->|"Appointment Ledger, Invoices, Payment Receipts, Ambulance Status"| Receptionist
 
-    Pharmacist -->|"Inventory Updates, Medication Dispensing"| System
-    System -->|"Prescription Queues, Low-Stock Warnings"| Pharmacist
+    LabTech -->|"Structured Lab Results (MySQL Summary + MongoDB Raw Parameters)"| System
+    System -->|"Pending Diagnostic Requests (Normal / Urgent / Emergency)"| LabTech
 
-    Admin -->|"System Configurations, Doctor Shifts, Bed Allocations"| System
-    System -->|"Hospital Analytics, Audit Logs, Revenue Reports"| Admin
+    Pharmacist -->|"FEFO Batch Dispensing"| System
+    System -->|"Pending Prescriptions, Batch Stock & Expiry Alerts"| Pharmacist
 
-    AmbulanceDriver -->|"Vehicle Status, Pickup / Destination Coordinates"| System
-    System -->|"Dispatch Orders, Linked Emergency Encounters"| AmbulanceDriver
+    Admin -->|"Doctor & Staff Creation, Shifts, Blood Bank Approvals, Bed & Fleet Governance"| System
+    System -->|"Hospital KPIs, Revenue Trends, Ward Occupancy, Audit Logs"| Admin
 ```
-

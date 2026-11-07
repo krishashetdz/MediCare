@@ -234,12 +234,23 @@
     // Inline validation driven by the native constraint API plus a few extra
     // rules via data-mv-rule. Each control lives in a .mv-field wrapper that
     // holds the .mv-error message node.
+    function parseLocalDate(value) {
+        if (!value) return new Date(NaN);
+        if (value instanceof Date) return value;
+        const s = String(value).trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+            const p = s.split('-');
+            return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+        }
+        return new Date(value);
+    }
+
     const RULES = {
         phone: { test: function (v) { return /^[0-9+\-\s()]{7,15}$/.test(v); }, message: 'Enter a valid phone number.' },
         positive: { test: function (v) { return Number(v) > 0; }, message: 'Enter a number greater than 0.' },
         nonneg: { test: function (v) { return Number(v) >= 0; }, message: 'Cannot be negative.' },
-        past: { test: function (v) { return new Date(v) <= new Date(); }, message: 'Date cannot be in the future.' },
-        future: { test: function (v) { return new Date(v) >= new Date(new Date().toDateString()); }, message: 'Pick today or a later date.' }
+        past: { test: function (v) { return parseLocalDate(v) <= new Date(); }, message: 'Date cannot be in the future.' },
+        future: { test: function (v) { return parseLocalDate(v) >= new Date(new Date().toDateString()); }, message: 'Pick today or a later date.' }
     };
 
     function fieldOf(control) { return control.closest('.mv-field') || control.parentElement; }
@@ -344,9 +355,10 @@
             const n = Number(value);
             return isFinite(n) ? n.toLocaleString('en-IN') : '--';
         },
+        parseDate: parseLocalDate,
         date: function (value) {
             if (!value) return '--';
-            const d = new Date(value);
+            const d = parseLocalDate(value);
             if (isNaN(d)) return String(value);
             return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
         },
@@ -402,7 +414,7 @@
         },
         daysUntil: function (value) {
             if (!value) return null;
-            const d = new Date(value);
+            const d = parseLocalDate(value);
             if (isNaN(d)) return null;
             const today = new Date(); today.setHours(0, 0, 0, 0);
             return Math.round((d - today) / 86400000);
@@ -416,7 +428,7 @@
         // Indian date: 12 Aug 2025
         dateIndian: function (value) {
             if (!value) return '--';
-            const d = new Date(value);
+            const d = parseLocalDate(value);
             if (isNaN(d)) return String(value);
             return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
         },

@@ -1,51 +1,48 @@
 # Activity Diagrams
-## Clinical & Operational Decision Workflows
+## Transactional Clinical & Operational Workflows
 
-### 1. Clinical Triage Assessment Activity
+### 1. Receptionist Appointment Rescheduling Activity
 ```mermaid
 flowchart TD
-    Start([Emergency Patient Presents]) --> CheckID{Patient Identified?}
-    CheckID -- Yes --> AttachID[Link to Existing Patient ID]
-    CheckID -- No --> TempID[Generate Temporary Emergency Record]
+    Start([Receptionist Selects Reschedule on Appointment]) --> BeginTx[Begin MySQL Transaction]
+    BeginTx --> LockAppt[SELECT APPOINTMENT ... FOR UPDATE]
+    LockAppt --> CheckStatus{Check Current Status}
 
-    AttachID --> MeasureVitals[Measure Blood Pressure, SpO2, Heart Rate, Temp, RR]
-    TempID --> MeasureVitals
+    CheckStatus -- Completed or Cancelled --> Rollback1[Rollback Transaction]
+    Rollback1 --> Return409A[Return HTTP 409 Conflict]
 
-    MeasureVitals --> CheckConsciousness[Assess Consciousness: Alert / Voice / Pain / Unresponsive]
-    CheckConsciousness --> EvaluateSeverity{Check Clinical Acuity}
+    CheckStatus -- Scheduled / Confirmed / Checked In --> CancelOld[UPDATE APPOINTMENT SET status = 'Cancelled']
+    CancelOld --> CallProc[CALL sp_book_appointment for Target Date & Time]
+    CallProc --> SlotFree{Is New Slot Available?}
 
-    EvaluateSeverity -- SpO2 < 90% OR Unresponsive OR Cardiac Arrest --> AssignP1[Assign P1: Critical Resuscitation]
-    EvaluateSeverity -- Severe Pain OR SpO2 90-93% OR HR > 120 --> AssignP2[Assign P2: High Priority Emergency]
-    EvaluateSeverity -- Moderate Symptoms OR Stable Fracture --> AssignP3[Assign P3: Moderate Urgent]
-    EvaluateSeverity -- Minor Complaint OR Stable Vitals --> AssignP4[Assign P4: Low Priority Non-urgent]
+    SlotFree -- No: Slot Already Booked --> ProcSignal[sp_book_appointment SIGNAL SQLSTATE '45000' & Rollback]
+    ProcSignal --> Return409B[Return HTTP 409 Conflict: Old Appointment Remains Active]
 
-    AssignP1 --> LogPriority[Record in EMERGENCY_PRIORITY_LOG]
-    AssignP2 --> LogPriority
-    AssignP3 --> LogPriority
-    AssignP4 --> LogPriority
-
-    LogPriority --> TriggerEngine[Execute Signature Emergency Priority Engine]
-    TriggerEngine --> End([Patient Placed in Priority Queue])
+    SlotFree -- Yes: Available --> InsertNew[Insert New Scheduled APPOINTMENT Row]
+    InsertNew --> CommitTx[Commit Transaction]
+    CommitTx --> LogAudit[Write RESCHEDULE appointment to MongoDB audit_log]
+    LogAudit --> End([Return HTTP 201 with New Appointment ID])
 ```
 
 ---
 
-### 2. Concurrency-Safe Bed Allocation Activity
+### 2. Pharmacy FEFO Batch Dispensing Activity
 ```mermaid
 flowchart TD
-    StartAlloc([Staff Initiates Bed Allocation]) --> BeginTx[Begin MySQL ACID Transaction]
-    BeginTx --> LockRow[Execute SELECT * FROM BED WHERE bed_id = ? FOR UPDATE]
-    LockRow --> CheckStatus{Is Bed Available?}
+    Start([Pharmacist Clicks Confirm Dispense]) --> BeginTx[Begin MySQL Transaction]
+    BeginTx --> LockPresc[SELECT PRESCRIPTION ... FOR UPDATE]
+    LockPresc --> CheckDisp{Already Dispensed?}
 
-    CheckStatus -- No: Already Occupied by Another Patient --> RollbackTx[Rollback Transaction]
-    RollbackTx --> ReturnConflict[Return HTTP 409 Conflict: Bed already allocated]
-    ReturnConflict --> EndFailure([Staff Selects Another Bed])
+    CheckDisp -- Yes --> RollbackDup[Rollback & Return HTTP 409 Conflict]
+    CheckDisp -- No --> LoadItems[Fetch PRESCRIPTION_ITEM Rows]
+    LoadItems --> LockBatches[SELECT MEDICINE_BATCH WHERE expiry_date >= CURDATE() AND available_qty > 0 ORDER BY expiry_date ASC FOR UPDATE]
+    LockBatches --> CheckStock{Total Non-Expired Stock >= Requested Qty?}
 
-    CheckStatus -- Yes: Available --> UpdateBed[Update BED SET status = 'Occupied', patient_id = ?]
-    UpdateBed --> LinkCase[Update EMERGENCY_CASE or Create ADMISSION record]
-    LinkCase --> CommitTx[Commit MySQL Transaction]
-    CommitTx --> LogMongo[Write Audit Event to MongoDB audit_log]
-    LogMongo --> Notify[Broadcast Bed Allocation Notification to Ward Nurse]
-    Notify --> EndSuccess([Bed Allocation Locked & Finalized])
+    CheckStock -- No --> RollbackStock[Rollback & Return HTTP 409 Insufficient Non-Expired Stock]
+    CheckStock -- Yes --> CreateHeader[INSERT INTO DISPENSING_RECORD]
+    CreateHeader --> DeductLoop[Deduct from Earliest Expiring Batches First & INSERT INTO DISPENSING_ITEM]
+    DeductLoop --> CheckLowStock[trg_low_stock_alert checks if total non-expired stock crossed below 20]
+    CheckLowStock --> UpdateStatus[UPDATE PRESCRIPTION SET status = 'Dispensed']
+    UpdateStatus --> CommitTx[Commit Transaction & Write MongoDB audit_log]
+    CommitTx --> End([Return HTTP 200 OK])
 ```
-
