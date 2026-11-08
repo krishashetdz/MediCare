@@ -1,7 +1,8 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
-const { mysqlPool, getMongo } = require('../config/db');
+const { mysqlPool } = require('../config/db');
 const { requireRole } = require('../middleware/auth');
+const { recordCrossDbOperation } = require('../services/crossDbSync');
 
 const router = express.Router();
 
@@ -102,24 +103,31 @@ router.patch('/beds/:id', requireRole('Admin', 'Nurse'), async (req, res) => {
         );
         const currentPatientId = (activeAdm[0] && activeAdm[0].patient_id) || (activeEmg[0] && activeEmg[0].patient_id) || null;
 
-        // Concurrency / availability check when assigning a bed to Occupied
-        if (status === 'Occupied') {
+        let newStatus = status || (patient_id ? 'Occupied' : 'Available');
+        let newPatientId = null;
+
+        if (newStatus === 'Occupied') {
             if (currentBed.status !== 'Available' && (!currentPatientId || Number(currentPatientId) !== Number(patient_id))) {
                 await conn.rollback();
                 return res.status(409).json({
                     error: `Concurrency conflict: Bed ${currentBed.bed_number} is currently ${currentBed.status}`
                 });
             }
-        }
 
-        let newStatus = status || (patient_id ? 'Occupied' : 'Available');
-        let newPatientId = null;
-
-        if (newStatus === 'Occupied') {
             newPatientId = patient_id || currentPatientId;
             if (!newPatientId) {
                 await conn.rollback();
                 return res.status(400).json({ error: 'patient_id is required when marking a bed Occupied' });
+            }
+
+            // Check if patient already has another active admission
+            const [[existingPatAdm]] = await conn.query(
+                "SELECT admission_id, bed_id FROM ADMISSION WHERE patient_id = ? AND status = 'Admitted' AND bed_id <> ? FOR UPDATE",
+                [newPatientId, req.params.id]
+            );
+            if (existingPatAdm) {
+                await conn.rollback();
+                return res.status(409).json({ error: 'Patient already has an active inpatient admission in another bed' });
             }
 
             await conn.query('UPDATE BED SET status = ? WHERE bed_id = ?', ['Occupied', req.params.id]);
@@ -137,51 +145,64 @@ router.patch('/beds/:id', requireRole('Admin', 'Nurse'), async (req, res) => {
                 );
             }
         } else if (newStatus === 'Cleaning' || newStatus === 'Available' || newStatus === 'Maintenance' || newStatus === 'Reserved') {
-            // If bed was Occupied, discharging the patient closes active ADMISSION, finalizes the bill,
-            // and transitions the bed through Cleaning (or directly to Available after cleaning).
+            // Strict Bed Release Workflow (Part 4.B):
+            // An occupied bed CANNOT transition directly to 'Available'; it must first transition to 'Cleaning'
+            // upon discharge, and only after cleaning confirmation can a 'Cleaning' bed transition to 'Available'.
+            if (currentBed.status === 'Occupied' && newStatus === 'Available') {
+                newStatus = 'Cleaning';
+            }
+
             if (activeAdm.length) {
                 const adm = activeAdm[0];
                 await conn.query(
                     `UPDATE ADMISSION
                      SET discharged_at = NOW(),
+                         discharged_by = ?,
                          discharge_summary = COALESCE(?, discharge_summary, 'Discharged from inpatient ward'),
                          status = 'Discharged'
                      WHERE admission_id = ?`,
-                    [discharge_summary || null, adm.admission_id]
+                    [req.session.user.id, discharge_summary || null, adm.admission_id]
                 );
 
-                // Finalize / create bill for the inpatient stay
+                // Finalize / create bill for the inpatient stay with unique reference_key to prevent duplicate billing
                 const days = Math.max(1, Math.ceil((Date.now() - new Date(adm.admitted_at).getTime()) / (1000 * 60 * 60 * 24)));
                 const roomCharge = Number((days * Number(currentBed.daily_rate || 1000)).toFixed(2));
+                const chargeRefKey = `ADM-DISCHARGE-${adm.admission_id}`;
 
-                const [existingBills] = await conn.query(
-                    `SELECT b.bill_id
-                     FROM BILL b
-                     JOIN vw_bill_summary vbs ON b.bill_id = vbs.bill_id
-                     WHERE b.patient_id = ? AND vbs.payment_status <> 'Paid'
-                     ORDER BY b.bill_date DESC LIMIT 1`,
-                    [adm.patient_id]
+                const [[existingCharge]] = await conn.query(
+                    'SELECT bill_item_id, bill_id FROM BILL_ITEM WHERE reference_key = ? LIMIT 1',
+                    [chargeRefKey]
                 );
 
-                let billId;
-                if (existingBills.length) {
-                    billId = existingBills[0].bill_id;
-                    await conn.query('UPDATE BILL SET admission_id = COALESCE(admission_id, ?) WHERE bill_id = ?', [adm.admission_id, billId]);
-                } else {
-                    const [billRes] = await conn.query(
-                        'INSERT INTO BILL (patient_id, admission_id, bill_date, generated_by) VALUES (?, ?, NOW(), ?)',
-                        [adm.patient_id, adm.admission_id, req.session.user.id]
+                if (!existingCharge) {
+                    const [existingBills] = await conn.query(
+                        `SELECT b.bill_id
+                         FROM BILL b
+                         JOIN vw_bill_summary vbs ON b.bill_id = vbs.bill_id
+                         WHERE b.patient_id = ? AND vbs.payment_status <> 'Paid'
+                         ORDER BY b.bill_date DESC LIMIT 1 FOR UPDATE`,
+                        [adm.patient_id]
                     );
-                    billId = billRes.insertId;
+
+                    let billId;
+                    if (existingBills.length) {
+                        billId = existingBills[0].bill_id;
+                        await conn.query('UPDATE BILL SET admission_id = COALESCE(admission_id, ?) WHERE bill_id = ?', [adm.admission_id, billId]);
+                    } else {
+                        const [billRes] = await conn.query(
+                            'INSERT INTO BILL (patient_id, admission_id, bill_date, generated_by) VALUES (?, ?, NOW(), ?)',
+                            [adm.patient_id, adm.admission_id, req.session.user.id]
+                        );
+                        billId = billRes.insertId;
+                    }
+
+                    await conn.query(
+                        'INSERT INTO BILL_ITEM (bill_id, item_type, description, amount, reference_key) VALUES (?, ?, ?, ?, ?)',
+                        [billId, 'Admission', `Inpatient stay - ${currentBed.ward_name} (${currentBed.bed_number}, ${days} day(s))`, roomCharge, chargeRefKey]
+                    );
                 }
 
-                await conn.query(
-                    'INSERT INTO BILL_ITEM (bill_id, item_type, description, amount) VALUES (?, ?, ?, ?)',
-                    [billId, 'Admission', `Inpatient stay - ${currentBed.ward_name} (${currentBed.bed_number}, ${days} day(s))`, roomCharge]
-                );
-
-                // When discharging an occupied bed, release to Cleaning first unless explicitly completing cleaning
-                if (currentBed.status === 'Occupied' && !req.body.skip_cleaning) {
+                if (currentBed.status === 'Occupied') {
                     newStatus = 'Cleaning';
                 }
             }
@@ -191,6 +212,9 @@ router.patch('/beds/:id', requireRole('Admin', 'Nurse'), async (req, res) => {
                     'UPDATE EMERGENCY_BED_ASSIGNMENT SET is_active = FALSE, released_at = NOW() WHERE bed_id = ? AND is_active = TRUE',
                     [req.params.id]
                 );
+                if (currentBed.status === 'Occupied') {
+                    newStatus = 'Cleaning';
+                }
             }
 
             await conn.query('UPDATE BED SET status = ? WHERE bed_id = ?', [newStatus, req.params.id]);
@@ -198,10 +222,11 @@ router.patch('/beds/:id', requireRole('Admin', 'Nurse'), async (req, res) => {
 
         await conn.commit();
 
-        // Audit log in MongoDB
-        try {
-            const mongo = getMongo();
-            await mongo.collection('audit_log').insertOne({
+        await recordCrossDbOperation({
+            idempotency_key: `AUDIT-BED-PATCH-${req.params.id}-${Date.now()}`,
+            collection_name: 'audit_log',
+            operation_type: 'insert',
+            payload: {
                 user_id: req.session.user.id,
                 action: 'UPDATE bed allocation',
                 table_affected: 'BED',
@@ -215,10 +240,8 @@ router.patch('/beds/:id', requireRole('Admin', 'Nurse'), async (req, res) => {
                     new_patient_id: newPatientId
                 },
                 timestamp: new Date()
-            });
-        } catch (mongoErr) {
-            console.warn('MongoDB audit_log write failed (non-fatal):', mongoErr.message);
-        }
+            }
+        });
 
         res.json({
             message: 'Bed updated successfully',
@@ -255,6 +278,9 @@ router.get('/dashboard', async (req, res) => {
             monthly_revenue: revenue, bed_occupancy: occupancy
         });
     } catch (err) {
+        if (err && (err.isMysqlUnavailable || err.code === 'ECONNREFUSED' || err.code === 'PROTOCOL_CONNECTION_LOST')) {
+            throw err;
+        }
         console.error(err);
         res.status(500).json({ error: 'Failed to load dashboard' });
     }
@@ -519,8 +545,11 @@ router.post('/staff', async (req, res) => {
 
         await conn.commit();
 
-        try {
-            await getMongo().collection('audit_log').insertOne({
+        await recordCrossDbOperation({
+            idempotency_key: `AUDIT-STAFF-CREATE-${userResult.insertId}`,
+            collection_name: 'audit_log',
+            operation_type: 'insert',
+            payload: {
                 user_id: req.session.user.id,
                 action: 'CREATE staff',
                 table_affected: 'STAFF',
@@ -534,8 +563,8 @@ router.post('/staff', async (req, res) => {
                     shift: targetShift
                 },
                 timestamp: new Date()
-            });
-        } catch (_) {}
+            }
+        });
 
         res.status(201).json({
             staff_id: userResult.insertId,

@@ -758,4 +758,40 @@
     };
 
     window.MV = MV;
+    window.toggleTheme = function () { MV.theme.toggle(); };
+
+    // Offline fallback for Bootstrap Modal when CDN is unreachable in air-gapped environments
+    if (!window.bootstrap) {
+        const modalInstances = new WeakMap();
+        function OfflineModal(el) {
+            this._el = typeof el === 'string' ? document.querySelector(el) : el;
+            if (this._el) modalInstances.set(this._el, this);
+        }
+        OfflineModal.prototype.show = function () {
+            if (!this._el) return;
+            this._el.classList.add('show', 'active');
+            this._el.style.display = 'block';
+            this._el.removeAttribute('aria-hidden');
+            this._el.setAttribute('aria-modal', 'true');
+        };
+        OfflineModal.prototype.hide = function () {
+            if (!this._el) return;
+            this._el.classList.remove('show', 'active');
+            this._el.style.display = 'none';
+            this._el.setAttribute('aria-hidden', 'true');
+        };
+        OfflineModal.getInstance = function (el) {
+            const node = typeof el === 'string' ? document.querySelector(el) : el;
+            return (node && modalInstances.get(node)) || new OfflineModal(node);
+        };
+        OfflineModal.getOrCreateInstance = OfflineModal.getInstance;
+        window.bootstrap = { Modal: OfflineModal };
+        document.addEventListener('click', function (e) {
+            const dismissBtn = e.target.closest('[data-bs-dismiss="modal"]');
+            if (dismissBtn) {
+                const modalEl = dismissBtn.closest('.modal');
+                if (modalEl) OfflineModal.getInstance(modalEl).hide();
+            }
+        });
+    }
 })(window, document);

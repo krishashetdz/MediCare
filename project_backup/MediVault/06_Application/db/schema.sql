@@ -1,25 +1,41 @@
 -- ============================================================================
--- MediVault / MediCare -- Canonical Normalized Database Schema (3NF)
+-- MediCare -- Canonical Normalized Database Schema (3NF)
 -- MySQL 8.0 / MariaDB 10.5+ compatible
--- Replaces Phase 2 DDL, Emergency Migrations, and ALTER Table Demos
+-- SAFE INITIALIZATION: Never drops the existing database or deletes records.
+-- Use `node db/install-fresh.js` for fresh installations and `node db/migrate.js`
+-- for incremental schema upgrades on existing databases.
 -- ============================================================================
 
-DROP DATABASE IF EXISTS medivault;
-CREATE DATABASE medivault CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS medivault CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE medivault;
+
+-- ============================================================================
+-- 0. MIGRATION TRACKING CLUSTER
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS SCHEMA_MIGRATIONS (
+    migration_id    INT AUTO_INCREMENT PRIMARY KEY,
+    version         VARCHAR(40) NOT NULL UNIQUE,
+    filename        VARCHAR(160) NOT NULL,
+    checksum        VARCHAR(64) NOT NULL,
+    applied_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    execution_ms    INT NOT NULL DEFAULT 0,
+    status          VARCHAR(20) NOT NULL DEFAULT 'Applied'
+                    CHECK (status IN ('Applied', 'RolledBack', 'Failed'))
+) ENGINE=InnoDB;
 
 -- ============================================================================
 -- 1. IDENTITY & ACCESS CLUSTER
 -- ============================================================================
 
 -- 1.1 ROLE
-CREATE TABLE ROLE (
+CREATE TABLE IF NOT EXISTS ROLE (
     role_id     INT AUTO_INCREMENT PRIMARY KEY,
     role_name   VARCHAR(30) NOT NULL UNIQUE
 ) ENGINE=InnoDB;
 
 -- 1.2 USER
-CREATE TABLE `USER` (
+CREATE TABLE IF NOT EXISTS `USER` (
     user_id         INT AUTO_INCREMENT PRIMARY KEY,
     name            VARCHAR(100) NOT NULL,
     email           VARCHAR(100) NOT NULL UNIQUE,
@@ -31,8 +47,8 @@ CREATE TABLE `USER` (
     CONSTRAINT fk_user_role FOREIGN KEY (role_id) REFERENCES ROLE(role_id) ON DELETE RESTRICT
 ) ENGINE=InnoDB;
 
--- 1.3 DEPARTMENT (hod_doctor_id circular FK added after DOCTOR creation)
-CREATE TABLE DEPARTMENT (
+-- 1.3 DEPARTMENT (hod_doctor_id circular FK added idempotently below)
+CREATE TABLE IF NOT EXISTS DEPARTMENT (
     department_id   INT AUTO_INCREMENT PRIMARY KEY,
     department_name VARCHAR(80) NOT NULL UNIQUE,
     floor_no        INT,
@@ -40,7 +56,7 @@ CREATE TABLE DEPARTMENT (
 ) ENGINE=InnoDB;
 
 -- 1.4 DOCTOR (extends USER; 1:1 subtype)
-CREATE TABLE DOCTOR (
+CREATE TABLE IF NOT EXISTS DOCTOR (
     doctor_id           INT PRIMARY KEY,
     department_id       INT NOT NULL,
     specialization      VARCHAR(80),
@@ -51,11 +67,8 @@ CREATE TABLE DOCTOR (
     CONSTRAINT fk_doctor_dept FOREIGN KEY (department_id) REFERENCES DEPARTMENT(department_id) ON DELETE RESTRICT
 ) ENGINE=InnoDB;
 
-ALTER TABLE DEPARTMENT
-    ADD CONSTRAINT fk_dept_hod FOREIGN KEY (hod_doctor_id) REFERENCES DOCTOR(doctor_id) ON DELETE SET NULL;
-
 -- 1.5 DOCTOR_SHIFT
-CREATE TABLE DOCTOR_SHIFT (
+CREATE TABLE IF NOT EXISTS DOCTOR_SHIFT (
     shift_id    INT AUTO_INCREMENT PRIMARY KEY,
     doctor_id   INT NOT NULL,
     shift_date  DATE NOT NULL,
@@ -68,7 +81,7 @@ CREATE TABLE DOCTOR_SHIFT (
 ) ENGINE=InnoDB;
 
 -- 1.6 DOCTOR_LEAVE
-CREATE TABLE DOCTOR_LEAVE (
+CREATE TABLE IF NOT EXISTS DOCTOR_LEAVE (
     leave_id    INT AUTO_INCREMENT PRIMARY KEY,
     doctor_id   INT NOT NULL,
     start_date  DATE NOT NULL,
@@ -82,7 +95,7 @@ CREATE TABLE DOCTOR_LEAVE (
 ) ENGINE=InnoDB;
 
 -- 1.7 PATIENT (extends USER; 1NF: multi-valued allergies moved to PATIENT_ALLERGY)
-CREATE TABLE PATIENT (
+CREATE TABLE IF NOT EXISTS PATIENT (
     patient_id          INT PRIMARY KEY,
     dob                 DATE,
     gender              CHAR(1) CHECK (gender IN ('M','F','O')),
@@ -93,7 +106,7 @@ CREATE TABLE PATIENT (
 ) ENGINE=InnoDB;
 
 -- 1.8 PATIENT_ALLERGY (1NF fix: atomic allergy rows per patient)
-CREATE TABLE PATIENT_ALLERGY (
+CREATE TABLE IF NOT EXISTS PATIENT_ALLERGY (
     allergy_id      INT AUTO_INCREMENT PRIMARY KEY,
     patient_id      INT NOT NULL,
     allergy_name    VARCHAR(100) NOT NULL,
@@ -104,7 +117,7 @@ CREATE TABLE PATIENT_ALLERGY (
 ) ENGINE=InnoDB;
 
 -- 1.9 STAFF (extends USER)
-CREATE TABLE STAFF (
+CREATE TABLE IF NOT EXISTS STAFF (
     staff_id        INT PRIMARY KEY,
     staff_type      ENUM('NURSE','LAB_TECHNICIAN','PHARMACIST','RECEPTIONIST') NOT NULL,
     department_id   INT NULL,
@@ -118,9 +131,7 @@ CREATE TABLE STAFF (
 -- ============================================================================
 
 -- 2.1 APPOINTMENT (3NF: department_id removed, derived via doctor_id -> DOCTOR.department_id)
--- Includes active_slot_date generated column so UNIQUE(doctor_id, active_slot_date, appointment_time)
--- prevents double-booking active appointments while allowing re-booking after Cancelled.
-CREATE TABLE APPOINTMENT (
+CREATE TABLE IF NOT EXISTS APPOINTMENT (
     appointment_id      INT AUTO_INCREMENT PRIMARY KEY,
     patient_id          INT NOT NULL,
     doctor_id           INT NOT NULL,
@@ -140,7 +151,7 @@ CREATE TABLE APPOINTMENT (
 ) ENGINE=InnoDB;
 
 -- 2.2 MEDICAL_RECORD
-CREATE TABLE MEDICAL_RECORD (
+CREATE TABLE IF NOT EXISTS MEDICAL_RECORD (
     record_id           INT AUTO_INCREMENT PRIMARY KEY,
     patient_id          INT NOT NULL,
     doctor_id           INT NOT NULL,
@@ -151,7 +162,7 @@ CREATE TABLE MEDICAL_RECORD (
 ) ENGINE=InnoDB;
 
 -- 2.3 CONSULTATION
-CREATE TABLE CONSULTATION (
+CREATE TABLE IF NOT EXISTS CONSULTATION (
     consultation_id     INT AUTO_INCREMENT PRIMARY KEY,
     appointment_id      INT NOT NULL UNIQUE,
     symptoms            VARCHAR(300),
@@ -166,7 +177,7 @@ CREATE TABLE CONSULTATION (
 -- ============================================================================
 
 -- 3.1 MEDICINE (3NF: catalog attributes only; stock_qty & expiry_date moved to MEDICINE_BATCH)
-CREATE TABLE MEDICINE (
+CREATE TABLE IF NOT EXISTS MEDICINE (
     medicine_id     INT AUTO_INCREMENT PRIMARY KEY,
     medicine_name   VARCHAR(100) NOT NULL UNIQUE,
     manufacturer    VARCHAR(100),
@@ -174,7 +185,7 @@ CREATE TABLE MEDICINE (
 ) ENGINE=InnoDB;
 
 -- 3.2 MEDICINE_BATCH (3NF: per-batch stock quantity and expiry date)
-CREATE TABLE MEDICINE_BATCH (
+CREATE TABLE IF NOT EXISTS MEDICINE_BATCH (
     batch_id        INT AUTO_INCREMENT PRIMARY KEY,
     medicine_id     INT NOT NULL,
     batch_number    VARCHAR(40) NOT NULL,
@@ -187,7 +198,7 @@ CREATE TABLE MEDICINE_BATCH (
 ) ENGINE=InnoDB;
 
 -- 3.3 PRESCRIPTION (3NF: patient_id & doctor_id removed, derived via consultation_id -> CONSULTATION -> APPOINTMENT)
-CREATE TABLE PRESCRIPTION (
+CREATE TABLE IF NOT EXISTS PRESCRIPTION (
     prescription_id     INT AUTO_INCREMENT PRIMARY KEY,
     consultation_id     INT NOT NULL,
     prescribed_date     DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -196,7 +207,7 @@ CREATE TABLE PRESCRIPTION (
 ) ENGINE=InnoDB;
 
 -- 3.4 PRESCRIPTION_ITEM (Includes instructions column for timing/frequency)
-CREATE TABLE PRESCRIPTION_ITEM (
+CREATE TABLE IF NOT EXISTS PRESCRIPTION_ITEM (
     item_id             INT AUTO_INCREMENT PRIMARY KEY,
     prescription_id     INT NOT NULL,
     medicine_id         INT NOT NULL,
@@ -209,7 +220,7 @@ CREATE TABLE PRESCRIPTION_ITEM (
 ) ENGINE=InnoDB;
 
 -- 3.5 DISPENSING_RECORD (Tracks pharmacist dispensing transaction)
-CREATE TABLE DISPENSING_RECORD (
+CREATE TABLE IF NOT EXISTS DISPENSING_RECORD (
     dispensing_id   INT AUTO_INCREMENT PRIMARY KEY,
     prescription_id INT NOT NULL UNIQUE,
     pharmacist_id   INT NULL,
@@ -220,7 +231,7 @@ CREATE TABLE DISPENSING_RECORD (
 ) ENGINE=InnoDB;
 
 -- 3.6 DISPENSING_ITEM (Tracks exact batch deductions per prescription item)
-CREATE TABLE DISPENSING_ITEM (
+CREATE TABLE IF NOT EXISTS DISPENSING_ITEM (
     dispensing_item_id      INT AUTO_INCREMENT PRIMARY KEY,
     dispensing_id           INT NOT NULL,
     prescription_item_id    INT NOT NULL,
@@ -236,7 +247,7 @@ CREATE TABLE DISPENSING_ITEM (
 -- ============================================================================
 
 -- 4.1 LAB_TEST
-CREATE TABLE LAB_TEST (
+CREATE TABLE IF NOT EXISTS LAB_TEST (
     test_id         INT AUTO_INCREMENT PRIMARY KEY,
     test_name       VARCHAR(100) NOT NULL UNIQUE,
     test_category   VARCHAR(50),
@@ -244,7 +255,7 @@ CREATE TABLE LAB_TEST (
 ) ENGINE=InnoDB;
 
 -- 4.2 LAB_REQUEST (Includes priority column)
-CREATE TABLE LAB_REQUEST (
+CREATE TABLE IF NOT EXISTS LAB_REQUEST (
     request_id      INT AUTO_INCREMENT PRIMARY KEY,
     consultation_id INT NOT NULL,
     test_id         INT NOT NULL,
@@ -258,7 +269,7 @@ CREATE TABLE LAB_REQUEST (
 ) ENGINE=InnoDB;
 
 -- 4.3 LAB_REPORT
-CREATE TABLE LAB_REPORT (
+CREATE TABLE IF NOT EXISTS LAB_REPORT (
     report_id       INT AUTO_INCREMENT PRIMARY KEY,
     request_id      INT NOT NULL UNIQUE,
     technician_id   INT NOT NULL,
@@ -273,7 +284,7 @@ CREATE TABLE LAB_REPORT (
 -- ============================================================================
 
 -- 5.1 WARD (3NF: normalized ward entity)
-CREATE TABLE WARD (
+CREATE TABLE IF NOT EXISTS WARD (
     ward_id     INT AUTO_INCREMENT PRIMARY KEY,
     ward_name   VARCHAR(50) NOT NULL UNIQUE,
     floor_no    INT DEFAULT 1,
@@ -282,7 +293,7 @@ CREATE TABLE WARD (
 ) ENGINE=InnoDB;
 
 -- 5.2 BED (3NF: references ward_id; occupancy derived from active ADMISSION / EMERGENCY_BED_ASSIGNMENT)
-CREATE TABLE BED (
+CREATE TABLE IF NOT EXISTS BED (
     bed_id      INT AUTO_INCREMENT PRIMARY KEY,
     ward_id     INT NOT NULL,
     bed_number  VARCHAR(10) NOT NULL,
@@ -293,7 +304,7 @@ CREATE TABLE BED (
 ) ENGINE=InnoDB;
 
 -- 5.3 AMBULANCE
-CREATE TABLE AMBULANCE (
+CREATE TABLE IF NOT EXISTS AMBULANCE (
     ambulance_id    INT AUTO_INCREMENT PRIMARY KEY,
     vehicle_number  VARCHAR(20) NOT NULL UNIQUE,
     driver_name     VARCHAR(100),
@@ -302,7 +313,7 @@ CREATE TABLE AMBULANCE (
 ) ENGINE=InnoDB;
 
 -- 5.4 BLOOD_BANK
-CREATE TABLE BLOOD_BANK (
+CREATE TABLE IF NOT EXISTS BLOOD_BANK (
     blood_id            INT AUTO_INCREMENT PRIMARY KEY,
     blood_group         VARCHAR(3) NOT NULL UNIQUE CHECK (blood_group IN ('A+','A-','B+','B-','AB+','AB-','O+','O-')),
     units_available     INT NOT NULL DEFAULT 0 CHECK (units_available >= 0),
@@ -310,13 +321,13 @@ CREATE TABLE BLOOD_BANK (
 ) ENGINE=InnoDB;
 
 -- 5.5 EMERGENCY_SEQUENCE (Concurrency-safe sequence generator for EMG-YYYY-XXX)
-CREATE TABLE EMERGENCY_SEQUENCE (
+CREATE TABLE IF NOT EXISTS EMERGENCY_SEQUENCE (
     seq_year    INT PRIMARY KEY,
     last_val    INT NOT NULL DEFAULT 0
 ) ENGINE=InnoDB;
 
--- 5.6 EMERGENCY_CASE (3NF: doctor and bed assignments tracked in history tables)
-CREATE TABLE EMERGENCY_CASE (
+-- 5.6 EMERGENCY_CASE (3NF: doctor and bed assignments tracked in history tables; explicit assessment_status)
+CREATE TABLE IF NOT EXISTS EMERGENCY_CASE (
     case_id             INT AUTO_INCREMENT PRIMARY KEY,
     emg_number          VARCHAR(30) NOT NULL UNIQUE,
     patient_id          INT NULL,
@@ -329,58 +340,68 @@ CREATE TABLE EMERGENCY_CASE (
     arrival_method      VARCHAR(50) NOT NULL DEFAULT 'Walk-in',
     ambulance_id        INT NULL,
     initial_complaint   TEXT NOT NULL,
-    triage_priority     VARCHAR(10) NOT NULL DEFAULT 'P3' CHECK (triage_priority IN ('P1','P2','P3','P4')),
+    triage_priority     VARCHAR(15) NULL DEFAULT NULL
+                        CHECK (triage_priority IS NULL OR triage_priority IN ('UNASSESSED','P1','P2','P3','P4')),
+    assessment_status   VARCHAR(20) NOT NULL DEFAULT 'Pending_Triage'
+                        CHECK (assessment_status IN ('Pending_Triage','Assessed')),
     status              VARCHAR(30) NOT NULL DEFAULT 'Waiting'
                         CHECK (status IN ('Waiting','Triage','Assigned','In Treatment','Admitted','Discharged','Transferred')),
     department_id       INT NULL,
     treatment_notes     TEXT NULL,
     discharge_summary   TEXT NULL,
     discharged_at       DATETIME NULL,
+    discharged_by       INT NULL,
     created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_emg_status (status),
     INDEX idx_emg_priority (triage_priority),
     INDEX idx_emg_arrival (arrival_time),
-    CONSTRAINT fk_emg_patient   FOREIGN KEY (patient_id) REFERENCES PATIENT(patient_id) ON DELETE SET NULL,
-    CONSTRAINT fk_emg_ambulance FOREIGN KEY (ambulance_id) REFERENCES AMBULANCE(ambulance_id) ON DELETE SET NULL,
-    CONSTRAINT fk_emg_dept      FOREIGN KEY (department_id) REFERENCES DEPARTMENT(department_id) ON DELETE SET NULL
+    CONSTRAINT fk_emg_patient       FOREIGN KEY (patient_id) REFERENCES PATIENT(patient_id) ON DELETE SET NULL,
+    CONSTRAINT fk_emg_ambulance     FOREIGN KEY (ambulance_id) REFERENCES AMBULANCE(ambulance_id) ON DELETE SET NULL,
+    CONSTRAINT fk_emg_dept          FOREIGN KEY (department_id) REFERENCES DEPARTMENT(department_id) ON DELETE SET NULL,
+    CONSTRAINT fk_emg_discharged_by FOREIGN KEY (discharged_by) REFERENCES `USER`(user_id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
 -- 5.7 EMERGENCY_DOCTOR_ASSIGNMENT (Assignment history; active assignment has is_active = TRUE)
-CREATE TABLE EMERGENCY_DOCTOR_ASSIGNMENT (
-    assignment_id   INT AUTO_INCREMENT PRIMARY KEY,
-    case_id         INT NOT NULL,
-    doctor_id       INT NOT NULL,
-    assigned_by     INT NULL,
-    override_reason VARCHAR(255) NULL,
-    assigned_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
-    unassigned_at   DATETIME NULL,
-    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+CREATE TABLE IF NOT EXISTS EMERGENCY_DOCTOR_ASSIGNMENT (
+    assignment_id           INT AUTO_INCREMENT PRIMARY KEY,
+    case_id                 INT NOT NULL,
+    doctor_id               INT NOT NULL,
+    recommended_doctor_id   INT NULL,
+    assigned_by             INT NULL,
+    override_reason         VARCHAR(255) NULL,
+    assigned_at             DATETIME DEFAULT CURRENT_TIMESTAMP,
+    unassigned_at           DATETIME NULL,
+    is_active               BOOLEAN NOT NULL DEFAULT TRUE,
     INDEX idx_eda_case_active (case_id, is_active),
     INDEX idx_eda_doc_active (doctor_id, is_active),
-    CONSTRAINT fk_eda_case   FOREIGN KEY (case_id) REFERENCES EMERGENCY_CASE(case_id) ON DELETE CASCADE,
-    CONSTRAINT fk_eda_doctor FOREIGN KEY (doctor_id) REFERENCES DOCTOR(doctor_id) ON DELETE CASCADE,
-    CONSTRAINT fk_eda_user   FOREIGN KEY (assigned_by) REFERENCES `USER`(user_id) ON DELETE SET NULL
+    CONSTRAINT fk_eda_case      FOREIGN KEY (case_id) REFERENCES EMERGENCY_CASE(case_id) ON DELETE CASCADE,
+    CONSTRAINT fk_eda_doctor    FOREIGN KEY (doctor_id) REFERENCES DOCTOR(doctor_id) ON DELETE CASCADE,
+    CONSTRAINT fk_eda_recdoc    FOREIGN KEY (recommended_doctor_id) REFERENCES DOCTOR(doctor_id) ON DELETE SET NULL,
+    CONSTRAINT fk_eda_user      FOREIGN KEY (assigned_by) REFERENCES `USER`(user_id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
 -- 5.8 EMERGENCY_BED_ASSIGNMENT (Bed assignment history; active assignment has is_active = TRUE)
-CREATE TABLE EMERGENCY_BED_ASSIGNMENT (
-    assignment_id   INT AUTO_INCREMENT PRIMARY KEY,
-    case_id         INT NOT NULL,
-    bed_id          INT NOT NULL,
-    assigned_by     INT NULL,
-    assigned_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
-    released_at     DATETIME NULL,
-    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+CREATE TABLE IF NOT EXISTS EMERGENCY_BED_ASSIGNMENT (
+    assignment_id       INT AUTO_INCREMENT PRIMARY KEY,
+    case_id             INT NOT NULL,
+    bed_id              INT NOT NULL,
+    recommended_bed_id  INT NULL,
+    assigned_by         INT NULL,
+    override_reason     VARCHAR(255) NULL,
+    assigned_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
+    released_at         DATETIME NULL,
+    is_active           BOOLEAN NOT NULL DEFAULT TRUE,
     INDEX idx_eba_case_active (case_id, is_active),
     INDEX idx_eba_bed_active (bed_id, is_active),
-    CONSTRAINT fk_eba_case FOREIGN KEY (case_id) REFERENCES EMERGENCY_CASE(case_id) ON DELETE CASCADE,
-    CONSTRAINT fk_eba_bed  FOREIGN KEY (bed_id) REFERENCES BED(bed_id) ON DELETE CASCADE,
-    CONSTRAINT fk_eba_user FOREIGN KEY (assigned_by) REFERENCES `USER`(user_id) ON DELETE SET NULL
+    CONSTRAINT fk_eba_case   FOREIGN KEY (case_id) REFERENCES EMERGENCY_CASE(case_id) ON DELETE CASCADE,
+    CONSTRAINT fk_eba_bed    FOREIGN KEY (bed_id) REFERENCES BED(bed_id) ON DELETE CASCADE,
+    CONSTRAINT fk_eba_recbed FOREIGN KEY (recommended_bed_id) REFERENCES BED(bed_id) ON DELETE SET NULL,
+    CONSTRAINT fk_eba_user   FOREIGN KEY (assigned_by) REFERENCES `USER`(user_id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
 -- 5.9 AMBULANCE_DISPATCH (Links ambulance dispatch to emergency case)
-CREATE TABLE AMBULANCE_DISPATCH (
+CREATE TABLE IF NOT EXISTS AMBULANCE_DISPATCH (
     dispatch_id     INT AUTO_INCREMENT PRIMARY KEY,
     ambulance_id    INT NOT NULL,
     case_id         INT NULL,
@@ -398,7 +419,7 @@ CREATE TABLE AMBULANCE_DISPATCH (
 ) ENGINE=InnoDB;
 
 -- 5.10 TRIAGE_ASSESSMENT
-CREATE TABLE TRIAGE_ASSESSMENT (
+CREATE TABLE IF NOT EXISTS TRIAGE_ASSESSMENT (
     assessment_id       INT AUTO_INCREMENT PRIMARY KEY,
     case_id             INT NOT NULL,
     nurse_id            INT NULL,
@@ -407,6 +428,7 @@ CREATE TABLE TRIAGE_ASSESSMENT (
     heart_rate          INT,
     spo2                INT,
     temperature         DECIMAL(4,1),
+    temperature_unit    VARCHAR(5) NOT NULL DEFAULT 'F' CHECK (temperature_unit IN ('F','C')),
     respiratory_rate    INT,
     consciousness_level VARCHAR(20) DEFAULT 'Alert',
     gcs_score           INT NULL,
@@ -415,6 +437,7 @@ CREATE TABLE TRIAGE_ASSESSMENT (
     symptoms            TEXT,
     injury_details      TEXT,
     assessment_notes    TEXT,
+    raw_payload         TEXT NULL,
     assessed_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_triage_case (case_id),
     CONSTRAINT fk_triage_case  FOREIGN KEY (case_id) REFERENCES EMERGENCY_CASE(case_id) ON DELETE CASCADE,
@@ -422,11 +445,11 @@ CREATE TABLE TRIAGE_ASSESSMENT (
 ) ENGINE=InnoDB;
 
 -- 5.11 EMERGENCY_PRIORITY_LOG
-CREATE TABLE EMERGENCY_PRIORITY_LOG (
+CREATE TABLE IF NOT EXISTS EMERGENCY_PRIORITY_LOG (
     log_id          INT AUTO_INCREMENT PRIMARY KEY,
     case_id         INT NOT NULL,
-    old_priority    VARCHAR(10) NOT NULL,
-    new_priority    VARCHAR(10) NOT NULL,
+    old_priority    VARCHAR(15) NOT NULL,
+    new_priority    VARCHAR(15) NOT NULL,
     changed_by      INT NULL,
     reason          TEXT NOT NULL,
     changed_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -435,7 +458,7 @@ CREATE TABLE EMERGENCY_PRIORITY_LOG (
 ) ENGINE=InnoDB;
 
 -- 5.12 EMERGENCY_TREATMENT_LOG
-CREATE TABLE EMERGENCY_TREATMENT_LOG (
+CREATE TABLE IF NOT EXISTS EMERGENCY_TREATMENT_LOG (
     treatment_id    INT AUTO_INCREMENT PRIMARY KEY,
     case_id         INT NOT NULL,
     doctor_id       INT NOT NULL,
@@ -447,7 +470,7 @@ CREATE TABLE EMERGENCY_TREATMENT_LOG (
 ) ENGINE=InnoDB;
 
 -- 5.13 BLOOD_REQUEST
-CREATE TABLE BLOOD_REQUEST (
+CREATE TABLE IF NOT EXISTS BLOOD_REQUEST (
     request_id      INT AUTO_INCREMENT PRIMARY KEY,
     patient_id      INT NULL,
     case_id         INT NULL,
@@ -468,7 +491,7 @@ CREATE TABLE BLOOD_REQUEST (
 ) ENGINE=InnoDB;
 
 -- 5.14 PATIENT_VITALS
-CREATE TABLE PATIENT_VITALS (
+CREATE TABLE IF NOT EXISTS PATIENT_VITALS (
     vitals_id           INT AUTO_INCREMENT PRIMARY KEY,
     patient_id          INT NULL,
     case_id             INT NULL,
@@ -489,7 +512,7 @@ CREATE TABLE PATIENT_VITALS (
 ) ENGINE=InnoDB;
 
 -- 5.15 NURSE_NOTE
-CREATE TABLE NURSE_NOTE (
+CREATE TABLE IF NOT EXISTS NURSE_NOTE (
     note_id     INT AUTO_INCREMENT PRIMARY KEY,
     patient_id  INT NULL,
     case_id     INT NULL,
@@ -507,7 +530,7 @@ CREATE TABLE NURSE_NOTE (
 ) ENGINE=InnoDB;
 
 -- 5.16 ADMISSION_REQUEST (Doctor-to-Nurse inpatient admission handoff)
-CREATE TABLE ADMISSION_REQUEST (
+CREATE TABLE IF NOT EXISTS ADMISSION_REQUEST (
     request_id          INT AUTO_INCREMENT PRIMARY KEY,
     patient_id          INT NOT NULL,
     doctor_id           INT NOT NULL,
@@ -532,7 +555,7 @@ CREATE TABLE ADMISSION_REQUEST (
 ) ENGINE=InnoDB;
 
 -- 5.17 ADMISSION (3NF: ward_name removed; derived via bed_id -> BED.ward_id -> WARD.ward_name)
-CREATE TABLE ADMISSION (
+CREATE TABLE IF NOT EXISTS ADMISSION (
     admission_id        INT AUTO_INCREMENT PRIMARY KEY,
     patient_id          INT NOT NULL,
     case_id             INT NULL,
@@ -541,16 +564,18 @@ CREATE TABLE ADMISSION (
     bed_id              INT NOT NULL,
     admitted_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
     discharged_at       DATETIME NULL,
+    discharged_by       INT NULL,
     discharge_summary   TEXT NULL,
     status              VARCHAR(20) NOT NULL DEFAULT 'Admitted' CHECK (status IN ('Admitted','Discharged','Transferred')),
     INDEX idx_admission_patient (patient_id),
     INDEX idx_admission_bed_status (bed_id, status),
     INDEX idx_admission_status (status),
-    CONSTRAINT fk_adm_patient FOREIGN KEY (patient_id) REFERENCES PATIENT(patient_id) ON DELETE CASCADE,
-    CONSTRAINT fk_adm_case    FOREIGN KEY (case_id) REFERENCES EMERGENCY_CASE(case_id) ON DELETE SET NULL,
-    CONSTRAINT fk_adm_req     FOREIGN KEY (request_id) REFERENCES ADMISSION_REQUEST(request_id) ON DELETE SET NULL,
-    CONSTRAINT fk_adm_doctor  FOREIGN KEY (admitting_doctor_id) REFERENCES DOCTOR(doctor_id) ON DELETE SET NULL,
-    CONSTRAINT fk_adm_bed     FOREIGN KEY (bed_id) REFERENCES BED(bed_id) ON DELETE CASCADE
+    CONSTRAINT fk_adm_patient       FOREIGN KEY (patient_id) REFERENCES PATIENT(patient_id) ON DELETE CASCADE,
+    CONSTRAINT fk_adm_case          FOREIGN KEY (case_id) REFERENCES EMERGENCY_CASE(case_id) ON DELETE SET NULL,
+    CONSTRAINT fk_adm_req           FOREIGN KEY (request_id) REFERENCES ADMISSION_REQUEST(request_id) ON DELETE SET NULL,
+    CONSTRAINT fk_adm_doctor        FOREIGN KEY (admitting_doctor_id) REFERENCES DOCTOR(doctor_id) ON DELETE SET NULL,
+    CONSTRAINT fk_adm_discharged_by FOREIGN KEY (discharged_by) REFERENCES `USER`(user_id) ON DELETE SET NULL,
+    CONSTRAINT fk_adm_bed           FOREIGN KEY (bed_id) REFERENCES BED(bed_id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 -- ============================================================================
@@ -558,7 +583,7 @@ CREATE TABLE ADMISSION (
 -- ============================================================================
 
 -- 6.1 BILL (3NF: total_amount and payment_status removed from base table; computed via vw_bill_summary)
-CREATE TABLE BILL (
+CREATE TABLE IF NOT EXISTS BILL (
     bill_id         INT AUTO_INCREMENT PRIMARY KEY,
     patient_id      INT NOT NULL,
     appointment_id  INT NULL,
@@ -573,19 +598,20 @@ CREATE TABLE BILL (
     CONSTRAINT fk_bill_user    FOREIGN KEY (generated_by) REFERENCES `USER`(user_id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
--- 6.2 BILL_ITEM (Allows Consultation, Lab, Medicine, Bed, Emergency, Admission)
-CREATE TABLE BILL_ITEM (
+-- 6.2 BILL_ITEM (Allows Consultation, Lab, Medicine, Bed, Emergency, Admission; reference_key prevents duplicates)
+CREATE TABLE IF NOT EXISTS BILL_ITEM (
     bill_item_id    INT AUTO_INCREMENT PRIMARY KEY,
     bill_id         INT NOT NULL,
     item_type       VARCHAR(20) NOT NULL
                     CHECK (item_type IN ('Consultation','Lab','Medicine','Bed','Emergency','Admission')),
     description     VARCHAR(200),
     amount          DECIMAL(8,2) NOT NULL CHECK (amount >= 0),
+    reference_key   VARCHAR(100) NULL UNIQUE,
     CONSTRAINT fk_billitem_bill FOREIGN KEY (bill_id) REFERENCES BILL(bill_id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 -- 6.3 PAYMENT (Records partial/full payments with unique receipt numbers)
-CREATE TABLE PAYMENT (
+CREATE TABLE IF NOT EXISTS PAYMENT (
     payment_id      INT AUTO_INCREMENT PRIMARY KEY,
     bill_id         INT NOT NULL,
     amount_paid     DECIMAL(10,2) NOT NULL CHECK (amount_paid > 0),
@@ -600,11 +626,11 @@ CREATE TABLE PAYMENT (
 ) ENGINE=InnoDB;
 
 -- ============================================================================
--- 7. CROSS-CUTTING CLUSTER
+-- 7. CROSS-CUTTING, SESSION & OUTBOX CLUSTER
 -- ============================================================================
 
 -- 7.1 NOTIFICATION
-CREATE TABLE NOTIFICATION (
+CREATE TABLE IF NOT EXISTS NOTIFICATION (
     notification_id INT AUTO_INCREMENT PRIMARY KEY,
     user_id         INT NOT NULL,
     message         VARCHAR(300) NOT NULL,
@@ -614,13 +640,40 @@ CREATE TABLE NOTIFICATION (
 ) ENGINE=InnoDB;
 
 -- 7.2 AUDIT_LOG
-CREATE TABLE AUDIT_LOG (
+CREATE TABLE IF NOT EXISTS AUDIT_LOG (
     log_id          INT AUTO_INCREMENT PRIMARY KEY,
     user_id         INT NULL,
     action          VARCHAR(200) NOT NULL,
     table_affected  VARCHAR(50) NOT NULL,
     timestamp       DATETIME DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_audit_user FOREIGN KEY (user_id) REFERENCES `USER`(user_id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+-- 7.3 USER_SESSION (Persistent MySQL session store for express-session)
+CREATE TABLE IF NOT EXISTS USER_SESSION (
+    session_id      VARCHAR(128) PRIMARY KEY,
+    user_id         INT NULL,
+    expires_at      BIGINT NOT NULL,
+    session_data    TEXT NOT NULL,
+    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_session_expires (expires_at),
+    CONSTRAINT fk_session_user FOREIGN KEY (user_id) REFERENCES `USER`(user_id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- 7.4 CROSS_DB_OUTBOX (Durable outbox for MySQL -> MongoDB cross-database consistency)
+CREATE TABLE IF NOT EXISTS CROSS_DB_OUTBOX (
+    outbox_id       INT AUTO_INCREMENT PRIMARY KEY,
+    idempotency_key VARCHAR(120) NOT NULL UNIQUE,
+    collection_name VARCHAR(60) NOT NULL,
+    operation_type  VARCHAR(20) NOT NULL DEFAULT 'upsert' CHECK (operation_type IN ('insert','upsert','update')),
+    filter_json     TEXT NULL,
+    payload_json    TEXT NOT NULL,
+    status          VARCHAR(20) NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Synced','Failed')),
+    retry_count     INT NOT NULL DEFAULT 0,
+    last_error      VARCHAR(500) NULL,
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    synced_at       DATETIME NULL,
+    INDEX idx_outbox_status (status, retry_count)
 ) ENGINE=InnoDB;
 
 -- ============================================================================
@@ -796,6 +849,11 @@ SELECT
 -- 10. TRIGGERS (EXPERIMENT 8)
 -- ============================================================================
 
+DROP TRIGGER IF EXISTS trg_update_stock;
+DROP TRIGGER IF EXISTS trg_low_stock_alert;
+DROP TRIGGER IF EXISTS trg_appointment_notification;
+DROP TRIGGER IF EXISTS trg_block_patient_delete;
+
 DELIMITER $$
 
 -- 10.1 Decrement batch stock (FEFO) when a prescription is marked Dispensed (if not already deducted)
@@ -820,7 +878,6 @@ BEGIN
     DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
 
     IF NEW.status = 'Dispensed' AND OLD.status <> 'Dispensed' THEN
-        -- Check if application transaction already recorded batch dispensing items
         SELECT COUNT(*) INTO v_already_dispensed
         FROM DISPENSING_RECORD
         WHERE prescription_id = NEW.prescription_id;
@@ -921,7 +978,7 @@ END$$
 -- 11. STORED PROCEDURES (TRANSACTIONAL WORKFLOWS)
 -- ============================================================================
 
--- 11.1 sp_book_appointment: Locks doctor and checks slot availability before booking
+DROP PROCEDURE IF EXISTS sp_book_appointment$$
 CREATE PROCEDURE sp_book_appointment(
     IN p_patient_id INT,
     IN p_doctor_id INT,
@@ -942,7 +999,6 @@ BEGIN
 
     START TRANSACTION;
 
-    -- Lock the doctor row to serialize concurrent bookings for the same doctor
     SELECT department_id INTO v_doc_dept
     FROM DOCTOR
     WHERE doctor_id = p_doctor_id
@@ -970,7 +1026,7 @@ BEGIN
     COMMIT;
 END$$
 
--- 11.2 sp_generate_bill: Creates BILL and itemized BILL_ITEM rows for a completed appointment
+DROP PROCEDURE IF EXISTS sp_generate_bill$$
 CREATE PROCEDURE sp_generate_bill(IN p_appointment_id INT, IN p_generated_by INT)
 BEGIN
     DECLARE v_patient_id INT;
@@ -978,6 +1034,7 @@ BEGIN
     DECLARE v_consultation_id INT;
     DECLARE v_fee DECIMAL(8,2);
     DECLARE v_bill_id INT;
+    DECLARE v_existing_bill_id INT DEFAULT NULL;
 
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
@@ -1000,27 +1057,36 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No consultation on record for this appointment yet';
     END IF;
 
-    SELECT consultation_fee INTO v_fee FROM DOCTOR WHERE doctor_id = v_doctor_id;
+    SELECT bill_id INTO v_existing_bill_id
+    FROM BILL
+    WHERE appointment_id = p_appointment_id
+    ORDER BY bill_id DESC
+    LIMIT 1
+    FOR UPDATE;
 
-    INSERT INTO BILL (patient_id, appointment_id, generated_by)
-    VALUES (v_patient_id, p_appointment_id, p_generated_by);
-    SET v_bill_id = LAST_INSERT_ID();
+    IF v_existing_bill_id IS NULL THEN
+        SELECT consultation_fee INTO v_fee FROM DOCTOR WHERE doctor_id = v_doctor_id;
 
-    INSERT INTO BILL_ITEM (bill_id, item_type, description, amount)
-    VALUES (v_bill_id, 'Consultation', 'Doctor consultation fee', v_fee);
+        INSERT INTO BILL (patient_id, appointment_id, generated_by)
+        VALUES (v_patient_id, p_appointment_id, p_generated_by);
+        SET v_bill_id = LAST_INSERT_ID();
 
-    INSERT INTO BILL_ITEM (bill_id, item_type, description, amount)
-    SELECT v_bill_id, 'Lab', lt.test_name, lt.price
-    FROM LAB_REQUEST lr
-    JOIN LAB_TEST lt ON lr.test_id = lt.test_id
-    WHERE lr.consultation_id = v_consultation_id;
+        INSERT INTO BILL_ITEM (bill_id, item_type, description, amount, reference_key)
+        VALUES (v_bill_id, 'Consultation', 'Doctor consultation fee', v_fee, CONCAT('APPT-CONSULT-', p_appointment_id));
 
-    INSERT INTO BILL_ITEM (bill_id, item_type, description, amount)
-    SELECT v_bill_id, 'Medicine', m.medicine_name, m.unit_price * pi.quantity
-    FROM PRESCRIPTION pr
-    JOIN PRESCRIPTION_ITEM pi ON pr.prescription_id = pi.prescription_id
-    JOIN MEDICINE m ON pi.medicine_id = m.medicine_id
-    WHERE pr.consultation_id = v_consultation_id;
+        INSERT INTO BILL_ITEM (bill_id, item_type, description, amount, reference_key)
+        SELECT v_bill_id, 'Lab', lt.test_name, lt.price, CONCAT('LAB-REQ-', lr.request_id)
+        FROM LAB_REQUEST lr
+        JOIN LAB_TEST lt ON lr.test_id = lt.test_id
+        WHERE lr.consultation_id = v_consultation_id;
+
+        INSERT INTO BILL_ITEM (bill_id, item_type, description, amount, reference_key)
+        SELECT v_bill_id, 'Medicine', m.medicine_name, m.unit_price * pi.quantity, CONCAT('RX-ITEM-', pi.item_id)
+        FROM PRESCRIPTION pr
+        JOIN PRESCRIPTION_ITEM pi ON pr.prescription_id = pi.prescription_id
+        JOIN MEDICINE m ON pi.medicine_id = m.medicine_id
+        WHERE pr.consultation_id = v_consultation_id;
+    END IF;
 
     COMMIT;
 END$$

@@ -4,8 +4,8 @@
 -- Replaces Phase 2 DDL, Emergency Migrations, and ALTER Table Demos
 -- ============================================================================
 
-DROP DATABASE IF EXISTS medivault;
-CREATE DATABASE medivault CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+-- SAFE SETUP: Never automatically drop an existing database
+CREATE DATABASE IF NOT EXISTS medivault CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE medivault;
 
 -- ============================================================================

@@ -1,10 +1,16 @@
 {
-  "name": "medivault-app",
+  "name": "medicare-app",
   "version": "1.0.0",
-  "description": "MediVault Hospital Management System - Node/Express + MySQL + MongoDB",
+  "description": "MediCare Smart Hospital & Emergency Management System - Node/Express + MySQL + MongoDB",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "db:install": "node db/install-fresh.js",
+    "db:migrate": "node db/migrate.js",
+    "db:migrate:status": "node db/migrate.js --status",
+    "db:backup": "node db/backup.js",
+    "test": "node test-e2e.js",
+    "test:browser": "python3 tests/test-browser-e2e.py"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

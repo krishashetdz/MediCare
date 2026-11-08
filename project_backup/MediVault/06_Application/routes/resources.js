@@ -1,8 +1,9 @@
 // Shared operational screens: Blood Bank & Ambulance Fleet
 const router = require('express').Router();
-const { mysqlPool, getMongo } = require('../config/db');
+const { mysqlPool } = require('../config/db');
 const { requireRole } = require('../middleware/auth');
 const { sendNotification } = require('../services/notificationService');
+const { recordCrossDbOperation } = require('../services/crossDbSync');
 
 // -----------------------------------------------------------------------------
 // Blood Bank Inventory
@@ -87,9 +88,11 @@ router.post('/blood-bank/request', requireRole('Admin', 'Doctor', 'Nurse'), asyn
             [pId, cId, req.session.user.id, blood_group, Number(units), priority, reason.trim()]
         );
 
-        // MongoDB Audit log
-        try {
-            await getMongo().collection('audit_log').insertOne({
+        await recordCrossDbOperation({
+            idempotency_key: `AUDIT-BLOOD-REQ-${result.insertId}`,
+            collection_name: 'audit_log',
+            operation_type: 'insert',
+            payload: {
                 user_id: req.session.user.id,
                 action: 'REQUEST blood',
                 table_affected: 'BLOOD_BANK',
@@ -103,14 +106,13 @@ router.post('/blood-bank/request', requireRole('Admin', 'Doctor', 'Nurse'), asyn
                     reason: reason.trim()
                 },
                 timestamp: new Date()
-            });
-        } catch (_) {}
+            }
+        });
 
-        // Notify Admin & Staff
         const alertMsg = priority === 'Emergency'
             ? `🚨 EMERGENCY BLOOD REQUEST: ${units} units of ${blood_group} urgently requested by ${req.session.user.name}. Reason: ${reason.slice(0, 50)}`
             : `Blood Request: ${units} units of ${blood_group} requested by ${req.session.user.name}`;
-        
+
         await sendNotification({ role_name: 'Admin', message: alertMsg, event_type: 'blood_request' });
 
         res.status(201).json({
@@ -161,7 +163,7 @@ router.post('/blood-bank/requests/:id/reject', requireRole('Admin', 'Doctor'), a
             [req.session.user.id, req.params.id]
         );
         if (!result.affectedRows) {
-            return res.status(404).json({ error: 'Request not found' });
+            return res.status(404).json({ error: 'Request not found or already fulfilled' });
         }
 
         const [[reqRow]] = await mysqlPool.query('SELECT requested_by, blood_group, units FROM BLOOD_REQUEST WHERE request_id=?', [req.params.id]);
@@ -197,11 +199,11 @@ router.post('/blood-bank/requests/:id/fulfill', requireRole('Admin', 'Doctor', '
         }
         if (reqRow.status === 'Fulfilled') {
             await conn.rollback();
-            return res.status(400).json({ error: 'This blood request has already been fulfilled' });
+            return res.status(409).json({ error: 'This blood request has already been fulfilled' });
         }
         if (reqRow.status === 'Rejected') {
             await conn.rollback();
-            return res.status(400).json({ error: 'Cannot fulfill a rejected request' });
+            return res.status(409).json({ error: 'Cannot fulfill a rejected request' });
         }
         if (reqRow.status !== 'Approved') {
             await conn.rollback();
@@ -234,9 +236,11 @@ router.post('/blood-bank/requests/:id/fulfill', requireRole('Admin', 'Doctor', '
 
         await conn.commit();
 
-        // MongoDB Audit Log
-        try {
-            await getMongo().collection('audit_log').insertOne({
+        await recordCrossDbOperation({
+            idempotency_key: `AUDIT-BLOOD-FULFILL-${req.params.id}`,
+            collection_name: 'audit_log',
+            operation_type: 'insert',
+            payload: {
                 user_id: req.session.user.id,
                 action: 'FULFILL blood request',
                 table_affected: 'BLOOD_BANK',
@@ -247,10 +251,9 @@ router.post('/blood-bank/requests/:id/fulfill', requireRole('Admin', 'Doctor', '
                     fulfilled_by: req.session.user.id
                 },
                 timestamp: new Date()
-            });
-        } catch (_) {}
+            }
+        });
 
-        // Notify requester
         await sendNotification({
             user_id: reqRow.requested_by,
             message: `Blood units issued: ${reqRow.units} unit(s) of ${reqRow.blood_group} fulfilled successfully.`,
@@ -268,7 +271,7 @@ router.post('/blood-bank/requests/:id/fulfill', requireRole('Admin', 'Doctor', '
 });
 
 // -----------------------------------------------------------------------------
-// Ambulance Fleet & Dispatch (Linked to EMERGENCY_CASE)
+// Ambulance Fleet, Registration, Driver Assignment & Dispatch
 // -----------------------------------------------------------------------------
 router.get('/ambulances', requireRole('Admin', 'Receptionist', 'Doctor', 'Nurse'), async (req, res) => {
     try {
@@ -286,15 +289,104 @@ router.get('/ambulances', requireRole('Admin', 'Receptionist', 'Doctor', 'Nurse'
     }
 });
 
+// Register a new ambulance vehicle in the fleet (TEST H: Register ambulance)
+router.post('/ambulances', requireRole('Admin', 'Receptionist'), async (req, res) => {
+    const { vehicle_number, driver_name, driver_phone, status = 'Available' } = req.body;
+    if (!vehicle_number || typeof vehicle_number !== 'string' || !vehicle_number.trim()) {
+        return res.status(400).json({ error: 'vehicle_number is required' });
+    }
+    const cleanVehicle = vehicle_number.trim().toUpperCase();
+    const validStatus = ['Available', 'On Duty', 'Maintenance'].includes(status) ? status : 'Available';
+
+    try {
+        const [existing] = await mysqlPool.query(
+            'SELECT ambulance_id FROM AMBULANCE WHERE vehicle_number = ? LIMIT 1',
+            [cleanVehicle]
+        );
+        if (existing.length > 0) {
+            return res.status(409).json({ error: `Ambulance with vehicle number ${cleanVehicle} is already registered` });
+        }
+
+        const [ins] = await mysqlPool.query(
+            'INSERT INTO AMBULANCE (vehicle_number, driver_name, driver_phone, status) VALUES (?, ?, ?, ?)',
+            [
+                cleanVehicle,
+                driver_name ? String(driver_name).trim() : null,
+                driver_phone ? String(driver_phone).trim() : null,
+                validStatus
+            ]
+        );
+
+        await recordCrossDbOperation({
+            idempotency_key: `AUDIT-AMB-REGISTER-${ins.insertId}`,
+            collection_name: 'audit_log',
+            operation_type: 'insert',
+            payload: {
+                user_id: req.session.user.id,
+                action: 'REGISTER ambulance',
+                table_affected: 'AMBULANCE',
+                details: {
+                    ambulance_id: ins.insertId,
+                    vehicle_number: cleanVehicle,
+                    driver_name: driver_name ? String(driver_name).trim() : null,
+                    status: validStatus
+                },
+                timestamp: new Date()
+            }
+        });
+
+        res.status(201).json({
+            message: 'Ambulance registered successfully',
+            ambulance_id: ins.insertId,
+            vehicle_number: cleanVehicle,
+            driver_name: driver_name ? String(driver_name).trim() : null,
+            driver_phone: driver_phone ? String(driver_phone).trim() : null,
+            status: validStatus
+        });
+    } catch (err) {
+        if (err && err.code === 'ER_DUP_ENTRY') {
+            return res.status(409).json({ error: `Ambulance with vehicle number ${cleanVehicle} is already registered` });
+        }
+        res.status(500).json({ error: 'Failed to register ambulance: ' + err.message });
+    }
+});
+
+// Assign or update driver / status on an existing ambulance (TEST H: Assign driver)
+router.patch('/ambulance/:id', requireRole('Admin', 'Receptionist'), async (req, res) => {
+    const { driver_name, driver_phone, status } = req.body;
+    const [[amb]] = await mysqlPool.query('SELECT * FROM AMBULANCE WHERE ambulance_id = ?', [req.params.id]);
+    if (!amb) {
+        return res.status(404).json({ error: 'Ambulance not found' });
+    }
+
+    const updatedDriver = driver_name !== undefined ? (driver_name ? String(driver_name).trim() : null) : amb.driver_name;
+    const updatedPhone = driver_phone !== undefined ? (driver_phone ? String(driver_phone).trim() : null) : amb.driver_phone;
+    const updatedStatus = status && ['Available', 'On Duty', 'Maintenance'].includes(status) ? status : amb.status;
+
+    await mysqlPool.query(
+        'UPDATE AMBULANCE SET driver_name = ?, driver_phone = ?, status = ? WHERE ambulance_id = ?',
+        [updatedDriver, updatedPhone, updatedStatus, req.params.id]
+    );
+
+    res.json({
+        message: 'Ambulance updated successfully',
+        ambulance_id: Number(req.params.id),
+        vehicle_number: amb.vehicle_number,
+        driver_name: updatedDriver,
+        driver_phone: updatedPhone,
+        status: updatedStatus
+    });
+});
+
 router.post('/ambulance/:id/dispatch', requireRole('Admin', 'Receptionist'), async (req, res) => {
     const {
         patient_name,
+        patient_id,
         pickup_location,
         destination = 'Hospital',
         contact_phone,
         case_id,
-        initial_complaint,
-        triage_priority = 'P2'
+        initial_complaint
     } = req.body;
 
     if (![patient_name, pickup_location, destination, contact_phone].every(x => typeof x === 'string' && x.trim())) {
@@ -319,13 +411,23 @@ router.post('/ambulance/:id/dispatch', requireRole('Admin', 'Receptionist'), asy
             return res.status(409).json({ error: 'This ambulance is no longer available' });
         }
 
-        // Resolve or link emergency case
+        // Resolve or link emergency case (without creating duplicate patient rows)
         let linkedCaseId = case_id ? Number(case_id) : null;
         let linkedEmgNumber = null;
+        let resolvedPatientId = patient_id ? Number(patient_id) : null;
+
+        if (!resolvedPatientId) {
+            const [[existingPatient]] = await conn.query(
+                `SELECT p.patient_id FROM PATIENT p JOIN \`USER\` u ON p.patient_id = u.user_id
+                 WHERE u.name = ? OR (u.phone IS NOT NULL AND u.phone = ?) LIMIT 1`,
+                [patient_name.trim(), contact_phone.trim()]
+            );
+            resolvedPatientId = existingPatient ? existingPatient.patient_id : null;
+        }
 
         if (linkedCaseId) {
             const [[existingCase]] = await conn.query(
-                'SELECT case_id, emg_number FROM EMERGENCY_CASE WHERE case_id = ? FOR UPDATE',
+                'SELECT case_id, emg_number, patient_id FROM EMERGENCY_CASE WHERE case_id = ? FOR UPDATE',
                 [linkedCaseId]
             );
             if (!existingCase) {
@@ -334,31 +436,32 @@ router.post('/ambulance/:id/dispatch', requireRole('Admin', 'Receptionist'), asy
             }
             linkedEmgNumber = existingCase.emg_number;
             await conn.query(
-                "UPDATE EMERGENCY_CASE SET ambulance_id = ?, arrival_method = 'Ambulance' WHERE case_id = ?",
-                [req.params.id, linkedCaseId]
+                "UPDATE EMERGENCY_CASE SET ambulance_id = ?, arrival_method = 'Ambulance', patient_id = COALESCE(patient_id, ?) WHERE case_id = ?",
+                [req.params.id, resolvedPatientId, linkedCaseId]
             );
         } else {
-            // Check if an active waiting case matches this patient name without an ambulance yet
+            // Check if an active waiting case matches this patient without an ambulance yet
             const [matchingCases] = await conn.query(
                 `SELECT ec.case_id, ec.emg_number
                  FROM EMERGENCY_CASE ec
                  LEFT JOIN \`USER\` u ON ec.patient_id = u.user_id
                  WHERE ec.ambulance_id IS NULL
                    AND ec.status NOT IN ('Discharged', 'Transferred')
-                   AND (ec.temp_patient_name = ? OR u.name = ?)
+                   AND (ec.temp_patient_name = ? OR u.name = ? OR (? IS NOT NULL AND ec.patient_id = ?))
                  ORDER BY ec.arrival_time DESC LIMIT 1 FOR UPDATE`,
-                [patient_name.trim(), patient_name.trim()]
+                [patient_name.trim(), patient_name.trim(), resolvedPatientId, resolvedPatientId]
             );
 
             if (matchingCases.length) {
                 linkedCaseId = matchingCases[0].case_id;
                 linkedEmgNumber = matchingCases[0].emg_number;
                 await conn.query(
-                    "UPDATE EMERGENCY_CASE SET ambulance_id = ?, arrival_method = 'Ambulance' WHERE case_id = ?",
-                    [req.params.id, linkedCaseId]
+                    "UPDATE EMERGENCY_CASE SET ambulance_id = ?, arrival_method = 'Ambulance', patient_id = COALESCE(patient_id, ?) WHERE case_id = ?",
+                    [req.params.id, resolvedPatientId, linkedCaseId]
                 );
             } else {
                 // Auto-create an incoming Emergency Case linked to this ambulance dispatch
+                // Marked as Pending_Triage / UNASSESSED until nurse triage is completed on arrival
                 const currentYear = new Date().getFullYear();
                 await conn.query(
                     'INSERT INTO EMERGENCY_SEQUENCE (seq_year, last_val) VALUES (?, 0) ON DUPLICATE KEY UPDATE last_val = last_val',
@@ -378,17 +481,11 @@ router.post('/ambulance/:id/dispatch', requireRole('Admin', 'Receptionist'), asy
                 const [[emgDept]] = await conn.query(
                     "SELECT department_id FROM DEPARTMENT WHERE department_name = 'Emergency Medicine' LIMIT 1"
                 );
-                const [[existingPatient]] = await conn.query(
-                    `SELECT p.patient_id FROM PATIENT p JOIN \`USER\` u ON p.patient_id = u.user_id
-                     WHERE u.name = ? OR (u.phone IS NOT NULL AND u.phone = ?) LIMIT 1`,
-                    [patient_name.trim(), contact_phone.trim()]
-                );
-                const resolvedPatientId = existingPatient ? existingPatient.patient_id : null;
                 const [caseIns] = await conn.query(
                     `INSERT INTO EMERGENCY_CASE (
                         emg_number, patient_id, temp_patient_name, contact_phone, arrival_time, arrival_method,
-                        ambulance_id, initial_complaint, triage_priority, status, department_id
-                    ) VALUES (?, ?, ?, ?, NOW(), 'Ambulance', ?, ?, ?, 'Waiting', ?)`,
+                        ambulance_id, initial_complaint, triage_priority, assessment_status, status, department_id
+                    ) VALUES (?, ?, ?, ?, NOW(), 'Ambulance', ?, ?, 'UNASSESSED', 'Pending_Triage', 'Waiting', ?)`,
                     [
                         linkedEmgNumber,
                         resolvedPatientId,
@@ -396,7 +493,6 @@ router.post('/ambulance/:id/dispatch', requireRole('Admin', 'Receptionist'), asy
                         contact_phone.trim(),
                         Number(req.params.id),
                         (initial_complaint && initial_complaint.trim()) || `Ambulance dispatch pickup from ${pickup_location.trim()}`,
-                        ['P1', 'P2', 'P3', 'P4'].includes(triage_priority) ? triage_priority : 'P2',
                         emgDept ? emgDept.department_id : null
                     ]
                 );
@@ -423,13 +519,16 @@ router.post('/ambulance/:id/dispatch', requireRole('Admin', 'Receptionist'), asy
 
         await conn.commit();
 
-        // MongoDB Dispatch Log & Audit
-        try {
-            const mongo = getMongo();
-            await mongo.collection('ambulance_dispatch_log').insertOne({
+        await recordCrossDbOperation({
+            idempotency_key: `AMB-DISPATCH-${dispRes.insertId}`,
+            collection_name: 'ambulance_dispatch_log',
+            operation_type: 'upsert',
+            filter: { dispatch_id: dispRes.insertId },
+            payload: {
                 dispatch_id: dispRes.insertId,
                 ambulance_id: Number(req.params.id),
                 case_id: linkedCaseId,
+                patient_id: resolvedPatientId,
                 emg_number: linkedEmgNumber,
                 vehicle_number: amb.vehicle_number,
                 driver_name: amb.driver_name,
@@ -440,9 +539,14 @@ router.post('/ambulance/:id/dispatch', requireRole('Admin', 'Receptionist'), asy
                 dispatched_by: req.session.user.id,
                 dispatched_at: new Date(),
                 status: 'In Transit'
-            });
+            }
+        });
 
-            await mongo.collection('audit_log').insertOne({
+        await recordCrossDbOperation({
+            idempotency_key: `AUDIT-AMB-DISPATCH-${dispRes.insertId}`,
+            collection_name: 'audit_log',
+            operation_type: 'insert',
+            payload: {
                 user_id: req.session.user.id,
                 action: 'DISPATCH ambulance',
                 table_affected: 'AMBULANCE',
@@ -450,6 +554,7 @@ router.post('/ambulance/:id/dispatch', requireRole('Admin', 'Receptionist'), asy
                     dispatch_id: dispRes.insertId,
                     ambulance_id: Number(req.params.id),
                     case_id: linkedCaseId,
+                    patient_id: resolvedPatientId,
                     emg_number: linkedEmgNumber,
                     patient_name: patient_name.trim(),
                     pickup_location: pickup_location.trim(),
@@ -457,8 +562,8 @@ router.post('/ambulance/:id/dispatch', requireRole('Admin', 'Receptionist'), asy
                     contact_phone: contact_phone.trim()
                 },
                 timestamp: new Date()
-            });
-        } catch (_) {}
+            }
+        });
 
         await sendNotification({
             role_name: 'Nurse',
@@ -470,12 +575,76 @@ router.post('/ambulance/:id/dispatch', requireRole('Admin', 'Receptionist'), asy
             message: 'Ambulance dispatched successfully',
             dispatch_id: dispRes.insertId,
             case_id: linkedCaseId,
+            patient_id: resolvedPatientId,
             emg_number: linkedEmgNumber
         });
     } catch (err) {
         await conn.rollback();
         console.error('Ambulance dispatch error:', err);
         res.status(500).json({ error: 'Failed to dispatch ambulance' });
+    } finally {
+        conn.release();
+    }
+});
+
+// Record ambulance arrival at hospital & link patient/case (TEST H: Record arrival)
+router.post('/ambulance/:id/arrive', requireRole('Admin', 'Receptionist', 'Nurse'), async (req, res) => {
+    const conn = await mysqlPool.getConnection();
+    try {
+        await conn.beginTransaction();
+        const [[amb]] = await conn.query('SELECT * FROM AMBULANCE WHERE ambulance_id = ? FOR UPDATE', [req.params.id]);
+        if (!amb) {
+            await conn.rollback();
+            return res.status(404).json({ error: 'Ambulance not found' });
+        }
+
+        const [[activeDispatch]] = await conn.query(
+            "SELECT * FROM AMBULANCE_DISPATCH WHERE ambulance_id = ? AND status = 'In Transit' ORDER BY dispatched_at DESC LIMIT 1 FOR UPDATE",
+            [req.params.id]
+        );
+        if (!activeDispatch) {
+            await conn.rollback();
+            return res.status(409).json({ error: 'No active in-transit dispatch found for this ambulance' });
+        }
+
+        await conn.query(
+            "UPDATE AMBULANCE_DISPATCH SET status = 'Completed', completed_at = NOW() WHERE dispatch_id = ?",
+            [activeDispatch.dispatch_id]
+        );
+        await conn.query("UPDATE AMBULANCE SET status = 'Available' WHERE ambulance_id = ?", [req.params.id]);
+
+        if (activeDispatch.case_id) {
+            await conn.query(
+                'UPDATE EMERGENCY_CASE SET arrival_time = NOW() WHERE case_id = ?',
+                [activeDispatch.case_id]
+            );
+        }
+
+        await conn.commit();
+
+        await recordCrossDbOperation({
+            idempotency_key: `AMB-ARRIVE-${activeDispatch.dispatch_id}`,
+            collection_name: 'ambulance_dispatch_log',
+            operation_type: 'upsert',
+            filter: { dispatch_id: activeDispatch.dispatch_id },
+            payload: {
+                dispatch_id: activeDispatch.dispatch_id,
+                ambulance_id: Number(req.params.id),
+                case_id: activeDispatch.case_id,
+                status: 'Completed',
+                completed_at: new Date()
+            }
+        });
+
+        res.json({
+            message: 'Ambulance arrival recorded and vehicle returned to Available status',
+            dispatch_id: activeDispatch.dispatch_id,
+            case_id: activeDispatch.case_id,
+            ambulance_status: 'Available'
+        });
+    } catch (err) {
+        await conn.rollback();
+        res.status(500).json({ error: 'Failed to record ambulance arrival' });
     } finally {
         conn.release();
     }
@@ -491,20 +660,32 @@ router.post('/ambulance/:id/release', requireRole('Admin', 'Receptionist', 'Nurs
             return res.status(404).json({ error: 'Ambulance not found' });
         }
 
+        const [[activeDispatch]] = await conn.query(
+            "SELECT dispatch_id, case_id FROM AMBULANCE_DISPATCH WHERE ambulance_id = ? AND status = 'In Transit' ORDER BY dispatched_at DESC LIMIT 1 FOR UPDATE",
+            [req.params.id]
+        );
+
         await conn.query(
             "UPDATE AMBULANCE_DISPATCH SET status = 'Completed', completed_at = NOW() WHERE ambulance_id = ? AND status = 'In Transit'",
             [req.params.id]
         );
         await conn.commit();
 
-        // Update MongoDB log
-        try {
-            await getMongo().collection('ambulance_dispatch_log').updateOne(
-                { ambulance_id: Number(req.params.id), status: 'In Transit' },
-                { $set: { status: 'Completed', completed_at: new Date() } },
-                { sort: { dispatched_at: -1 } }
-            );
-        } catch (_) {}
+        if (activeDispatch) {
+            await recordCrossDbOperation({
+                idempotency_key: `AMB-RELEASE-${activeDispatch.dispatch_id}`,
+                collection_name: 'ambulance_dispatch_log',
+                operation_type: 'upsert',
+                filter: { dispatch_id: activeDispatch.dispatch_id },
+                payload: {
+                    dispatch_id: activeDispatch.dispatch_id,
+                    ambulance_id: Number(req.params.id),
+                    case_id: activeDispatch.case_id,
+                    status: 'Completed',
+                    completed_at: new Date()
+                }
+            });
+        }
 
         res.json({ message: 'Ambulance marked available' });
     } catch (err) {

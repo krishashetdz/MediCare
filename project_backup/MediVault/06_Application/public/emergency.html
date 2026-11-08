@@ -96,6 +96,7 @@
 .p-badge.p2 { background: rgba(234, 88, 12, .15); color: #f97316; border: 1px solid rgba(234, 88, 12, .3); }
 .p-badge.p3 { background: rgba(37, 99, 235, .15); color: #3b82f6; border: 1px solid rgba(37, 99, 235, .3); }
 .p-badge.p4 { background: rgba(107, 114, 128, .15); color: #9ca3af; border: 1px solid rgba(107, 114, 128, .3); }
+.p-badge.unassessed { background: rgba(234, 179, 8, .16); color: #ca8a04; border: 1px solid rgba(234, 179, 8, .35); }
 
 /* Priority Engine Recommendation Card */
 .engine-rec-box {
@@ -227,8 +228,14 @@
                                 <input type="number" class="form-control" name="spo2" placeholder="e.g. 98" min="50" max="100">
                             </div>
                             <div class="col-md-4">
-                                <label class="form-label">Temperature (°F)</label>
-                                <input type="number" step="0.1" class="form-control" name="temperature" placeholder="e.g. 98.6" min="85" max="108">
+                                <label class="form-label">Temperature</label>
+                                <div class="input-group">
+                                    <input type="number" step="0.1" class="form-control" name="temperature" placeholder="e.g. 98.6" min="30" max="110">
+                                    <select class="form-select" id="triageTempUnit" name="temperature_unit" style="max-width:78px">
+                                        <option value="F" selected>°F</option>
+                                        <option value="C">°C</option>
+                                    </select>
+                                </div>
                             </div>
                             <div class="col-md-4">
                                 <label class="form-label">Respiratory Rate (breaths/min)</label>
@@ -636,7 +643,9 @@
                       '<tbody>';
 
             queueData.forEach(function (c) {
-                const pClass = (c.triage_priority || 'P3').toLowerCase();
+                const isUnassessed = c.triage_pending || c.assessment_status === 'Pending_Triage' || !c.triage_priority || c.triage_priority === 'UNASSESSED';
+                const pClass = isUnassessed ? 'unassessed' : c.triage_priority.toLowerCase();
+                const pLabel = isUnassessed ? 'Triage Pending' : c.triage_priority;
                 const arrivalFormatted = new Date(c.arrival_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
                 html += '<tr>' +
@@ -644,7 +653,7 @@
                     '<td><span class="fw-bold text-primary">' + MV.esc(c.emg_number) + '</span><br><small class="text-muted">' + MV.esc(c.arrival_method) + '</small></td>' +
                     '<td><strong>' + MV.esc(c.patient_name) + '</strong> (' + c.gender + ', ' + c.age + 'y)<br><small class="text-muted text-truncate d-inline-block" style="max-width:240px">' + MV.esc(c.initial_complaint) + '</small></td>' +
                     '<td>' + arrivalFormatted + '<br><small class="fw-semibold ' + (c.waiting_minutes > 30 ? 'text-danger' : 'text-muted') + '">' + c.waiting_minutes + ' min wait</small></td>' +
-                    '<td><span class="p-badge ' + pClass + '">' + (c.triage_priority || 'P3') + '</span></td>' +
+                    '<td><span class="p-badge ' + pClass + '">' + MV.esc(pLabel) + '</span></td>' +
                     '<td>' +
                       '<div><i class="fas fa-user-doctor me-1 text-muted"></i>' + (c.assigned_doctor_name ? MV.esc(c.assigned_doctor_name) : '<span class="text-muted">Unassigned</span>') + '</div>' +
                       '<div><i class="fas fa-bed me-1 text-muted"></i>' + (c.bed_number ? MV.esc(c.ward_name + ' ' + c.bed_number) : '<span class="text-muted">No Bed</span>') + '</div>' +
@@ -1014,7 +1023,7 @@
             document.getElementById('triageCaseId').value = c.case_id;
             document.getElementById('triagePatientName').value = c.patient_name;
             document.getElementById('triageEmgNumber').value = c.emg_number;
-            document.getElementById('triagePrioritySelect').value = c.triage_priority || 'P3';
+            document.getElementById('triagePrioritySelect').value = (c.triage_priority && c.triage_priority !== 'UNASSESSED') ? c.triage_priority : '';
             triageModalInst.show();
         } catch (err) {
             MV.toast({ message: 'Failed to open triage: ' + err.message, type: 'danger' });
@@ -1031,25 +1040,85 @@
             const rec = await MV.api.get('/api/emergency/priority-engine/' + caseId);
             activeEngineRec = rec;
 
-            let docHtml = '<span class="text-danger">No doctor available</span>';
+            const isPendingTriage = Boolean(rec.triage_pending || rec.assessment_status === 'Pending_Triage' || rec.current_priority === 'UNASSESSED');
+            const badgeClass = isPendingTriage ? 'unassessed' : (rec.current_priority || 'p3').toLowerCase();
+            const badgeText = isPendingTriage ? 'Triage Pending' : rec.current_priority;
+
+            let triageAlertHtml = '';
+            if (isPendingTriage) {
+                triageAlertHtml =
+                    '<div class="alert alert-warning py-2 px-3 small mb-3 d-flex justify-content-between align-items-center flex-wrap gap-2">' +
+                      '<div><i class="fas fa-triangle-exclamation me-1"></i> <strong>Triage Assessment Pending:</strong> ' +
+                        MV.esc(rec.triage_required_message || 'Complete clinical triage assessment before normal recommendation workflow, or proceed with manual emergency allocation below.') +
+                      '</div>' +
+                      '<button type="button" class="mv-btn mv-btn-sm mv-btn-primary" onclick="window.openTriageFromEngine(' + rec.case_id + ')">' +
+                        '<i class="fas fa-stethoscope me-1"></i> Record Triage Now' +
+                      '</button>' +
+                    '</div>';
+            }
+
+            let docHtml = '<span class="text-danger">' + MV.esc(rec.no_doctor_explanation || (isPendingTriage ? 'Withheld until triage assessment is recorded' : 'No doctor available')) + '</span>';
             if (rec.recommended_doctor) {
                 docHtml = '<div><strong>' + MV.esc(rec.recommended_doctor.name) + '</strong> (' + MV.esc(rec.recommended_doctor.specialization) + ')</div>' +
                     '<div class="engine-reason">' + MV.esc(rec.recommended_doctor.reason) + '</div>';
             }
 
-            let bedHtml = '<span class="text-warning">No free emergency bed</span>';
+            let bedHtml = '<span class="text-warning">' + MV.esc(rec.no_bed_explanation || (isPendingTriage ? 'Withheld until triage assessment is recorded' : 'No free emergency bed')) + '</span>';
             if (rec.recommended_bed) {
                 bedHtml = '<div><strong>' + MV.esc(rec.recommended_bed.ward_name) + ' — ' + MV.esc(rec.recommended_bed.bed_number) + '</strong></div>' +
                     '<div class="engine-reason">' + MV.esc(rec.recommended_bed.reason) + '</div>';
             }
 
-            let deptHtml = '<strong>' + MV.esc(rec.recommended_department.name) + '</strong><div class="engine-reason">' + MV.esc(rec.recommended_department.reason) + '</div>';
+            let deptHtml = '';
+            if (rec.recommended_department && rec.recommended_department.matched !== false) {
+                deptHtml = '<strong>' + MV.esc(rec.recommended_department.name) + '</strong><div class="engine-reason">' + MV.esc(rec.recommended_department.reason || '') + '</div>';
+            } else {
+                deptHtml = '<span class="text-danger">' + MV.esc((rec.recommended_department && rec.recommended_department.error) || 'No matching department found — select manually below') + '</span>';
+            }
+
+            // Build doctor options (recommended + alternative eligible doctors)
+            const allDocChoices = [];
+            if (rec.recommended_doctor) allDocChoices.push(rec.recommended_doctor);
+            if (Array.isArray(rec.alternative_doctors)) {
+                rec.alternative_doctors.forEach(function (d) {
+                    if (!allDocChoices.some(function (x) { return Number(x.doctor_id) === Number(d.doctor_id); })) {
+                        allDocChoices.push(d);
+                    }
+                });
+            }
+
+            const allBedChoices = [];
+            if (rec.recommended_bed) allBedChoices.push(rec.recommended_bed);
+            if (Array.isArray(rec.alternative_beds)) {
+                rec.alternative_beds.forEach(function (b) {
+                    if (!allBedChoices.some(function (x) { return Number(x.bed_id) === Number(b.bed_id); })) {
+                        allBedChoices.push(b);
+                    }
+                });
+            }
+
+            const deptChoices = Array.isArray(rec.available_departments) ? rec.available_departments : [];
+
+            let excludedSummaryHtml = '';
+            if ((Array.isArray(rec.excluded_doctors) && rec.excluded_doctors.length) || (Array.isArray(rec.excluded_beds) && rec.excluded_beds.length)) {
+                excludedSummaryHtml = '<div class="mt-2 pt-2 border-top small text-muted">' +
+                    '<strong>Engine Evaluation Notes:</strong>' +
+                    '<ul class="mb-0 ps-3 mt-1">' +
+                    (rec.excluded_doctors || []).slice(0, 3).map(function (ed) {
+                        return '<li>' + MV.esc(ed.name) + ': ' + MV.esc(ed.excluded_reason) + '</li>';
+                    }).join('') +
+                    (rec.excluded_beds || []).slice(0, 2).map(function (eb) {
+                        return '<li>' + MV.esc(eb.excluded_reason) + '</li>';
+                    }).join('') +
+                    '</ul></div>';
+            }
 
             body.innerHTML =
+                triageAlertHtml +
                 '<div class="engine-rec-box">' +
                   '<div class="d-flex justify-content-between align-items-center mb-3">' +
                     '<div><h5 class="fw-bold mb-0">' + MV.esc(rec.emg_number) + ' &bull; ' + MV.esc(rec.patient_name) + '</h5><small class="text-muted">Wait: ' + rec.waiting_minutes + ' min</small></div>' +
-                    '<span class="p-badge ' + (rec.current_priority || 'P3').toLowerCase() + '">' + rec.current_priority + '</span>' +
+                    '<span class="p-badge ' + badgeClass + '">' + MV.esc(badgeText) + '</span>' +
                   '</div>' +
                   '<div class="engine-rec-item">' +
                     '<span class="engine-rec-label">Recommended Doctor</span>' +
@@ -1063,13 +1132,66 @@
                     '<span class="engine-rec-label">Target Department</span>' +
                     '<div class="engine-rec-val">' + deptHtml + '</div>' +
                   '</div>' +
+                  excludedSummaryHtml +
                 '</div>' +
+
+                '<div class="p-3 mb-3" style="background:var(--mv-surface-1);border:1px solid var(--mv-border);border-radius:var(--mv-radius)">' +
+                  '<h6 class="fw-bold mb-2" style="font-size:.875rem"><i class="fas fa-sliders me-1"></i>Resource Selection &amp; Manual Override</h6>' +
+                  '<div class="row g-2 mb-2">' +
+                    '<div class="col-md-4">' +
+                      '<label class="form-label small mb-1">Assign Doctor</label>' +
+                      '<select class="form-select form-select-sm" id="engineSelectDoctor">' +
+                        '<option value="">-- Select on-duty doctor --</option>' +
+                        allDocChoices.map(function (d) {
+                            const isRec = rec.recommended_doctor && Number(rec.recommended_doctor.doctor_id) === Number(d.doctor_id);
+                            return '<option value="' + d.doctor_id + '" ' + (isRec ? 'selected' : '') + '>' +
+                                MV.esc(d.name) + ' (' + MV.esc(d.specialization) + ')' + (isRec ? ' [Recommended]' : '') +
+                            '</option>';
+                        }).join('') +
+                      '</select>' +
+                    '</div>' +
+                    '<div class="col-md-4">' +
+                      '<label class="form-label small mb-1">Assign Bed</label>' +
+                      '<select class="form-select form-select-sm" id="engineSelectBed">' +
+                        '<option value="">-- Select available bed --</option>' +
+                        allBedChoices.map(function (b) {
+                            const isRec = rec.recommended_bed && Number(rec.recommended_bed.bed_id) === Number(b.bed_id);
+                            return '<option value="' + b.bed_id + '" ' + (isRec ? 'selected' : '') + '>' +
+                                MV.esc(b.ward_name + ' — ' + b.bed_number) + (isRec ? ' [Recommended]' : '') +
+                            '</option>';
+                        }).join('') +
+                      '</select>' +
+                    '</div>' +
+                    '<div class="col-md-4">' +
+                      '<label class="form-label small mb-1">Department</label>' +
+                      '<select class="form-select form-select-sm" id="engineSelectDepartment">' +
+                        '<option value="">-- Select department --</option>' +
+                        deptChoices.map(function (dep) {
+                            const isRec = rec.recommended_department && Number(rec.recommended_department.id) === Number(dep.department_id);
+                            return '<option value="' + dep.department_id + '" ' + (isRec ? 'selected' : '') + '>' +
+                                MV.esc(dep.department_name) +
+                            '</option>';
+                        }).join('') +
+                      '</select>' +
+                    '</div>' +
+                  '</div>' +
+                  '<div>' +
+                    '<label class="form-label small mb-1" for="engineOverrideReason">Manual Override Reason <span class="text-muted">(Required when overriding recommended doctor/bed)</span></label>' +
+                    '<input type="text" class="form-control form-control-sm" id="engineOverrideReason" name="override_reason" placeholder="State clinical or operational reason if overriding engine recommendation...">' +
+                  '</div>' +
+                '</div>' +
+
                 '<div class="alert alert-info py-2 px-3 small mb-0">' +
                   '<i class="fas fa-info-circle me-1"></i> ' + MV.esc(rec.clinical_notice) +
                 '</div>';
         } catch (err) {
             body.innerHTML = MV.emptyState({ icon: 'alert-circle', title: 'Engine Error', text: err.message });
         }
+    };
+
+    window.openTriageFromEngine = function (caseId) {
+        engineModalInst.hide();
+        window.openTriageModal(caseId);
     };
 
     // Priority Change Modal
@@ -1177,10 +1299,34 @@
         // Priority Engine Confirm Allocation
         document.getElementById('confirmEngineAllocationBtn').addEventListener('click', async function () {
             if (!activeEngineRec) return;
+            const docSel = document.getElementById('engineSelectDoctor');
+            const bedSel = document.getElementById('engineSelectBed');
+            const deptSel = document.getElementById('engineSelectDepartment');
+            const overrideInput = document.getElementById('engineOverrideReason');
+
+            const selectedDocId = docSel ? (docSel.value ? Number(docSel.value) : null) : (activeEngineRec.recommended_doctor ? activeEngineRec.recommended_doctor.doctor_id : null);
+            const selectedBedId = bedSel ? (bedSel.value ? Number(bedSel.value) : null) : (activeEngineRec.recommended_bed ? activeEngineRec.recommended_bed.bed_id : null);
+            const selectedDeptId = deptSel ? (deptSel.value ? Number(deptSel.value) : null) : (activeEngineRec.recommended_department ? activeEngineRec.recommended_department.id : null);
+            const overrideReason = overrideInput ? overrideInput.value.trim() : '';
+
+            const recDocId = activeEngineRec.recommended_doctor ? Number(activeEngineRec.recommended_doctor.doctor_id) : null;
+            const recBedId = activeEngineRec.recommended_bed ? Number(activeEngineRec.recommended_bed.bed_id) : null;
+
+            const isOverride = (selectedDocId && recDocId && selectedDocId !== recDocId) ||
+                               (selectedBedId && recBedId && selectedBedId !== recBedId);
+            if (isOverride && !overrideReason) {
+                MV.toast({ message: 'Please enter a Manual Override Reason when selecting a resource different from the engine recommendation.', type: 'danger' });
+                if (overrideInput) overrideInput.focus();
+                return;
+            }
+
             const payload = {
-                doctor_id: activeEngineRec.recommended_doctor ? activeEngineRec.recommended_doctor.doctor_id : null,
-                bed_id: activeEngineRec.recommended_bed ? activeEngineRec.recommended_bed.bed_id : null,
-                department_id: activeEngineRec.recommended_department ? activeEngineRec.recommended_department.id : null
+                doctor_id: selectedDocId,
+                bed_id: selectedBedId,
+                department_id: selectedDeptId,
+                recommended_doctor_id: recDocId,
+                recommended_bed_id: recBedId,
+                override_reason: overrideReason || undefined
             };
 
             const restore = MV.pending(this, 'Allocating...');

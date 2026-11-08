@@ -1,6 +1,7 @@
 const express = require('express');
-const { mysqlPool, getMongo } = require('../config/db');
+const { mysqlPool, getMongo, isMongoAvailable } = require('../config/db');
 const { requireRole } = require('../middleware/auth');
+const { recordCrossDbOperation } = require('../services/crossDbSync');
 
 const router = express.Router();
 router.use(requireRole('Doctor'));
@@ -91,10 +92,11 @@ router.patch('/appointments/:id/status', async (req, res) => {
         return res.status(404).json({ error: 'Appointment not found or not owned by you' });
     }
 
-    // Audit log
-    try {
-        const mongo = getMongo();
-        await mongo.collection('audit_log').insertOne({
+    await recordCrossDbOperation({
+        idempotency_key: `AUDIT-APPT-STATUS-${req.params.id}-${status}-${Date.now()}`,
+        collection_name: 'audit_log',
+        operation_type: 'insert',
+        payload: {
             user_id: req.session.user.id,
             action: status === 'Confirmed' ? 'CONFIRM appointment' : 'UPDATE appointment status',
             table_affected: 'APPOINTMENT',
@@ -104,8 +106,8 @@ router.patch('/appointments/:id/status', async (req, res) => {
                 status: status
             },
             timestamp: new Date()
-        });
-    } catch (_) {}
+        }
+    });
 
     res.json({ message: `Appointment ${status.toLowerCase()} successfully` });
 });
@@ -127,7 +129,7 @@ router.get('/my-patients', async (req, res) => {
     res.json(rows);
 });
 
-// Helper to fetch lab reports (MySQL summary + MongoDB lab_reports_raw) for a patient
+// Helper to fetch lab reports (MySQL summary + MongoDB lab_reports_raw with outbox fallback) for a patient
 async function fetchPatientLabReports(patientId) {
     const [summaries] = await mysqlPool.query(
         `SELECT lr.report_id, lr.request_id, rq.priority, rq.status,
@@ -144,15 +146,33 @@ async function fetchPatientLabReports(patientId) {
          ORDER BY lr.report_date DESC`,
         [patientId]
     );
+    if (!summaries.length) return [];
+
+    const requestIds = summaries.map(s => s.request_id);
+    if (isMongoAvailable()) {
+        try {
+            const mongo = getMongo();
+            const raw = await mongo.collection('lab_reports_raw').find({ request_id: { $in: requestIds } }, { projection: { _id: 0 } }).toArray();
+            return summaries.map(s => ({ ...s, raw: raw.find(r => Number(r.request_id) === Number(s.request_id)) || null, raw_source: 'mongodb' }));
+        } catch (_) {}
+    }
+
+    // Fallback to CROSS_DB_OUTBOX if MongoDB is temporarily offline so raw parameters are not lost
     try {
-        const mongo = getMongo();
-        const requestIds = summaries.map(s => s.request_id);
-        const raw = requestIds.length
-            ? await mongo.collection('lab_reports_raw').find({ request_id: { $in: requestIds } }, { projection: { _id: 0 } }).toArray()
-            : [];
-        return summaries.map(s => ({ ...s, raw: raw.find(r => r.request_id === s.request_id) || null }));
+        const [outboxRows] = await mysqlPool.query(
+            "SELECT payload_json FROM CROSS_DB_OUTBOX WHERE collection_name = 'lab_reports_raw'"
+        );
+        const outboxDocs = outboxRows.map(r => {
+            try { return JSON.parse(r.payload_json); } catch (_) { return null; }
+        }).filter(Boolean);
+        return summaries.map(s => ({
+            ...s,
+            raw: outboxDocs.find(d => Number(d.request_id) === Number(s.request_id)) || null,
+            raw_source: 'mysql_outbox_fallback',
+            mongo_degraded: true
+        }));
     } catch (_) {
-        return summaries.map(s => ({ ...s, raw: null }));
+        return summaries.map(s => ({ ...s, raw: null, mongo_degraded: true }));
     }
 }
 
@@ -242,9 +262,9 @@ router.get('/lab-reports', async (req, res) => {
         const raw = requestIds.length
             ? await mongo.collection('lab_reports_raw').find({ request_id: { $in: requestIds } }, { projection: { _id: 0 } }).toArray()
             : [];
-        return res.json(summaries.map(s => ({ ...s, raw: raw.find(r => r.request_id === s.request_id) || null })));
+        return res.json(summaries.map(s => ({ ...s, raw: raw.find(r => Number(r.request_id) === Number(s.request_id)) || null })));
     } catch (_) {
-        return res.json(summaries.map(s => ({ ...s, raw: null })));
+        return res.json(summaries.map(s => ({ ...s, raw: null, mongo_degraded: true })));
     }
 });
 
@@ -366,20 +386,21 @@ router.post('/consultations', async (req, res) => {
             }
         }
 
-        // Inpatient Admission Recommendation (normalized: resolves recommended_ward_id from WARD)
+        // Inpatient Admission Recommendation (normalized: resolves recommended_ward_id from WARD without silent wrong-ward fallback)
         if (recommend_admission && appt.patient_id) {
             const [[existingAdmReq]] = await conn.query(
                 "SELECT request_id FROM ADMISSION_REQUEST WHERE consultation_id = ? AND status = 'Pending' LIMIT 1",
                 [consultationId]
             );
             if (!existingAdmReq) {
-                const targetWardName = recommended_ward || 'General Ward';
+                const targetWardName = recommended_ward ? String(recommended_ward).trim() : 'General Ward';
                 const prio = ['Standard', 'Urgent', 'Critical'].includes(admission_priority) ? admission_priority : 'Urgent';
                 const admReason = admission_reason || String(diagnosis).trim() || 'Doctor recommended inpatient hospitalization';
 
-                let [[wardRow]] = await conn.query('SELECT ward_id, ward_name FROM WARD WHERE ward_name = ? LIMIT 1', [targetWardName]);
+                const [[wardRow]] = await conn.query('SELECT ward_id, ward_name FROM WARD WHERE ward_name = ? LIMIT 1', [targetWardName]);
                 if (!wardRow) {
-                    [[wardRow]] = await conn.query('SELECT ward_id, ward_name FROM WARD ORDER BY ward_id LIMIT 1');
+                    await conn.rollback();
+                    return res.status(400).json({ error: `Invalid recommended_ward: '${targetWardName}' does not exist` });
                 }
 
                 const [admReq] = await conn.query(
@@ -461,10 +482,11 @@ router.post('/consultations', async (req, res) => {
         }
     }
 
-    // MongoDB audit_log
-    try {
-        const mongo = getMongo();
-        await mongo.collection('audit_log').insertOne({
+    await recordCrossDbOperation({
+        idempotency_key: `AUDIT-CONSULT-${consultationId}`,
+        collection_name: 'audit_log',
+        operation_type: 'upsert',
+        payload: {
             user_id: req.session.user.id,
             action: 'COMPLETE consultation',
             table_affected: 'CONSULTATION',
@@ -480,10 +502,8 @@ router.post('/consultations', async (req, res) => {
                 recommended_ward: recommend_admission ? (recommended_ward || 'General Ward') : null
             },
             timestamp: new Date()
-        });
-    } catch (mongoErr) {
-        console.warn('MongoDB audit_log write failed (non-fatal):', mongoErr.message);
-    }
+        }
+    });
 
     res.status(201).json({
         consultation_id: consultationId,
@@ -561,9 +581,12 @@ router.post('/prescriptions', async (req, res) => {
     }
 });
 
-// Lab request form submit (enforces consultation ownership).
+// Lab request form submit (enforces consultation ownership and valid test_id).
 router.post('/lab-requests', async (req, res) => {
     const { consultation_id, test_id, priority } = req.body;
+    if (!consultation_id || !test_id) {
+        return res.status(400).json({ error: 'consultation_id and test_id are required' });
+    }
     const [[consult]] = await mysqlPool.query(
         `SELECT c.consultation_id, a.doctor_id
          FROM CONSULTATION c
@@ -576,6 +599,11 @@ router.post('/lab-requests', async (req, res) => {
     }
     if (Number(consult.doctor_id) !== Number(req.session.user.id)) {
         return res.status(403).json({ error: 'Access denied: you can only order lab tests for your own consultations' });
+    }
+
+    const [[testRow]] = await mysqlPool.query('SELECT test_id FROM LAB_TEST WHERE test_id = ?', [test_id]);
+    if (!testRow) {
+        return res.status(400).json({ error: `Invalid lab test_id: ${test_id}` });
     }
 
     const validPriority = ['Normal', 'Urgent', 'Emergency'].includes(priority) ? priority : 'Normal';

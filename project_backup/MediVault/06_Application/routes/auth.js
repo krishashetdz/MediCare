@@ -7,9 +7,13 @@ const router = express.Router();
 // One login page, one endpoint, for every role -- ROLE lookup decides where
 // the frontend redirects to next. Passwords must be verified against bcrypt hashes.
 router.post('/login', async (req, res) => {
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+        return res.status(400).json({ error: 'Invalid login payload' });
+    }
     const { email, password } = req.body;
+    // Strict string type check prevents NoSQL / object injection payloads like { email: { $ne: null } }
     if (!email || !password || typeof email !== 'string' || typeof password !== 'string') {
-        return res.status(400).json({ error: 'Email and password are required' });
+        return res.status(400).json({ error: 'Email and password must be non-empty strings' });
     }
     try {
         const [rows] = await mysqlPool.query(
@@ -43,12 +47,13 @@ router.post('/login', async (req, res) => {
             staffType = staffRows[0] ? staffRows[0].staff_type : null;
         }
 
-        req.session.user = {
+        const userSessionPayload = {
             id: user.user_id,
             name: user.name,
             email: user.email,
             role: user.role_name,
-            staffType
+            staffType,
+            loginAt: Date.now()
         };
 
         const redirectMap = {
@@ -61,23 +66,53 @@ router.post('/login', async (req, res) => {
             Receptionist: '/staff-portal.html'
         };
 
+        // Regenerate session ID after successful login to prevent session fixation (Part 6.7)
+        if (typeof req.session.regenerate === 'function') {
+            return req.session.regenerate((regenErr) => {
+                if (regenErr) {
+                    return res.status(500).json({ error: 'Could not establish session' });
+                }
+                req.session.user = userSessionPayload;
+                req.session.save(() => {
+                    res.json({
+                        message: 'Login successful',
+                        user: req.session.user,
+                        redirect: redirectMap[user.role_name] || '/'
+                    });
+                });
+            });
+        }
+
+        req.session.user = userSessionPayload;
         res.json({
             message: 'Login successful',
             user: req.session.user,
             redirect: redirectMap[user.role_name] || '/'
         });
     } catch (err) {
-        console.error(err);
+        if (err && (err.isMysqlUnavailable || err.code === 'ECONNREFUSED')) {
+            return res.status(503).json({ error: 'Authentication database is temporarily unavailable' });
+        }
+        console.error('Login error:', err.message);
         res.status(500).json({ error: 'Server error during login' });
     }
 });
 
 router.post('/logout', (req, res) => {
-    req.session.destroy(() => res.json({ message: 'Logged out' }));
+    if (!req.session) {
+        res.clearCookie('medicare.sid');
+        res.clearCookie('connect.sid');
+        return res.json({ message: 'Logged out' });
+    }
+    req.session.destroy(() => {
+        res.clearCookie('medicare.sid');
+        res.clearCookie('connect.sid');
+        res.json({ message: 'Logged out' });
+    });
 });
 
 router.get('/me', async (req, res) => {
-    if (!req.session.user) return res.status(401).json({ error: 'Not logged in' });
+    if (!req.session || !req.session.user) return res.status(401).json({ error: 'Not logged in' });
     if (!req.session.user.email) {
         try {
             const [rows] = await mysqlPool.query('SELECT email FROM `USER` WHERE user_id = ?', [req.session.user.id]);

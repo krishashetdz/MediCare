@@ -1,6 +1,7 @@
 const express = require('express');
-const { mysqlPool, getMongo } = require('../config/db');
+const { mysqlPool, getMongo, isMongoAvailable } = require('../config/db');
 const { requireRole } = require('../middleware/auth');
+const { recordCrossDbOperation } = require('../services/crossDbSync');
 
 const router = express.Router();
 router.use(requireRole('Patient'));
@@ -22,10 +23,11 @@ router.post('/book-appointment', async (req, res) => {
             [req.session.user.id, doctor_id, department_id || null, appointment_date, appointment_time, req.session.user.id]
         );
 
-        // MongoDB audit_log
-        try {
-            const mongo = getMongo();
-            await mongo.collection('audit_log').insertOne({
+        await recordCrossDbOperation({
+            idempotency_key: `AUDIT-BOOK-APPT-${req.session.user.id}-${doctor_id}-${appointment_date}-${appointment_time}`,
+            collection_name: 'audit_log',
+            operation_type: 'insert',
+            payload: {
                 user_id: req.session.user.id,
                 action: 'BOOK appointment',
                 table_affected: 'APPOINTMENT',
@@ -38,10 +40,8 @@ router.post('/book-appointment', async (req, res) => {
                     appointment_time
                 },
                 timestamp: new Date()
-            });
-        } catch (mongoErr) {
-            console.warn('MongoDB audit_log write failed (non-fatal):', mongoErr.message);
-        }
+            }
+        });
 
         res.status(201).json({ message: 'Appointment booked' });
     } catch (err) {
@@ -122,7 +122,7 @@ router.get('/bills', async (req, res) => {
     res.json(rows);
 });
 
-// Lab reports -- one line summary from MySQL, full structured result from MongoDB
+// Lab reports -- one line summary from MySQL, full structured result from MongoDB (or CROSS_DB_OUTBOX fallback)
 router.get('/lab-reports', async (req, res) => {
     const [summaries] = await mysqlPool.query(
         `SELECT lr.report_id, lr.request_id, lt.test_name, lr.result_summary, lr.report_date
@@ -133,16 +133,22 @@ router.get('/lab-reports', async (req, res) => {
          JOIN APPOINTMENT a ON c.appointment_id = a.appointment_id
          WHERE a.patient_id = ?`, [req.session.user.id]
     );
+    const requestIds = summaries.map(s => s.request_id);
+    if (isMongoAvailable() && requestIds.length) {
+        try {
+            const mongo = getMongo();
+            const raw = await mongo.collection('lab_reports_raw').find({ request_id: { $in: requestIds } }, { projection: { _id: 0 } }).toArray();
+            const merged = summaries.map(s => ({ ...s, raw: raw.find(r => Number(r.request_id) === Number(s.request_id)) || null }));
+            return res.json(merged);
+        } catch (_) {}
+    }
+
     try {
-        const mongo = getMongo();
-        const requestIds = summaries.map(s => s.request_id);
-        const raw = requestIds.length
-            ? await mongo.collection('lab_reports_raw').find({ request_id: { $in: requestIds } }, { projection: { _id: 0 } }).toArray()
-            : [];
-        const merged = summaries.map(s => ({ ...s, raw: raw.find(r => r.request_id === s.request_id) || null }));
-        res.json(merged);
-    } catch (mongoErr) {
-        res.json(summaries.map(s => ({ ...s, raw: null })));
+        const [outboxRows] = await mysqlPool.query("SELECT payload_json FROM CROSS_DB_OUTBOX WHERE collection_name = 'lab_reports_raw'");
+        const outboxDocs = outboxRows.map(r => { try { return JSON.parse(r.payload_json); } catch (_) { return null; } }).filter(Boolean);
+        res.json(summaries.map(s => ({ ...s, raw: outboxDocs.find(d => Number(d.request_id) === Number(s.request_id)) || null, mongo_degraded: true })));
+    } catch (_) {
+        res.json(summaries.map(s => ({ ...s, raw: null, mongo_degraded: true })));
     }
 });
 

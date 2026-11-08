@@ -1,8 +1,10 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
-const { mysqlPool, getMongo } = require('../config/db');
+const { mysqlPool, getMongo, isMongoAvailable } = require('../config/db');
 const { requireRole } = require('../middleware/auth');
 const { sendNotification, broadcastToRole } = require('../services/notificationService');
+const { validateTriagePayload } = require('../config/triageLimits');
+const { recordCrossDbOperation } = require('../services/crossDbSync');
 
 const router = express.Router();
 
@@ -139,11 +141,28 @@ router.post('/nurse/assign-admission-bed', requireRole('Admin', 'Nurse'), async 
 
         // 1. Fetch and lock admission request
         const [requests] = await conn.query('SELECT * FROM ADMISSION_REQUEST WHERE request_id = ? FOR UPDATE', [request_id]);
-        if (!requests.length || requests[0].status !== 'Pending') {
+        if (!requests.length) {
             await conn.rollback();
-            return res.status(400).json({ error: 'Admission request not found or already processed' });
+            return res.status(404).json({ error: 'Admission request not found' });
+        }
+        if (requests[0].status !== 'Pending') {
+            await conn.rollback();
+            return res.status(409).json({ error: 'Admission request has already been processed' });
         }
         const admReq = requests[0];
+
+        // Prevent duplicate active admission for the same patient
+        const [[existingAdm]] = await conn.query(
+            "SELECT admission_id, bed_id FROM ADMISSION WHERE patient_id = ? AND status = 'Admitted' FOR UPDATE",
+            [admReq.patient_id]
+        );
+        if (existingAdm) {
+            await conn.rollback();
+            return res.status(409).json({
+                error: 'Patient already has an active inpatient admission',
+                admission_id: existingAdm.admission_id
+            });
+        }
 
         // 2. Fetch and lock bed (must be Available)
         const [beds] = await conn.query(
@@ -203,7 +222,7 @@ router.post('/nurse/assign-admission-bed', requireRole('Admin', 'Nurse'), async 
     }
 });
 
-// Nurse / Admin: Normal Inpatient Discharge -> closes ADMISSION, finalizes BILL, releases BED to Cleaning
+// Nurse / Admin / Doctor: Normal Inpatient Discharge -> closes ADMISSION, finalizes BILL idempotently, releases BED to Cleaning
 router.post('/nurse/discharge-inpatient', requireRole('Admin', 'Nurse', 'Doctor'), async (req, res) => {
     const { admission_id, bed_id, patient_id, discharge_summary, room_fee } = req.body;
     if (!admission_id && !bed_id && !patient_id) {
@@ -213,6 +232,30 @@ router.post('/nurse/discharge-inpatient', requireRole('Admin', 'Nurse', 'Doctor'
     const conn = await mysqlPool.getConnection();
     try {
         await conn.beginTransaction();
+
+        // If admission_id was explicitly supplied, lock that row directly so we can detect repeated discharge attempts
+        if (admission_id) {
+            const [[explicitAdm]] = await conn.query(
+                `SELECT adm.*, b.bed_number, w.ward_name, w.daily_rate
+                 FROM ADMISSION adm
+                 JOIN BED b ON adm.bed_id = b.bed_id
+                 JOIN WARD w ON b.ward_id = w.ward_id
+                 WHERE adm.admission_id = ? FOR UPDATE`,
+                [admission_id]
+            );
+            if (!explicitAdm) {
+                await conn.rollback();
+                return res.status(404).json({ error: 'Admission record not found' });
+            }
+            if (explicitAdm.status === 'Discharged') {
+                await conn.rollback();
+                return res.status(409).json({
+                    error: `Admission #${explicitAdm.admission_id} has already been discharged`,
+                    already_discharged: true,
+                    discharged_at: explicitAdm.discharged_at
+                });
+            }
+        }
 
         let admQuery = `SELECT adm.*, b.bed_number, w.ward_name, w.daily_rate
                         FROM ADMISSION adm
@@ -235,7 +278,7 @@ router.post('/nurse/discharge-inpatient', requireRole('Admin', 'Nurse', 'Doctor'
         const [admRows] = await conn.query(admQuery, params);
         if (!admRows.length) {
             await conn.rollback();
-            return res.status(404).json({ error: 'Active inpatient admission not found' });
+            return res.status(409).json({ error: 'Active inpatient admission not found or already discharged' });
         }
         const adm = admRows[0];
 
@@ -244,50 +287,74 @@ router.post('/nurse/discharge-inpatient', requireRole('Admin', 'Nurse', 'Doctor'
 
         const summaryText = (discharge_summary && discharge_summary.trim()) || 'Patient discharged from inpatient ward in stable condition.';
 
-        // 1. Close ADMISSION
+        // 1. Close ADMISSION with discharged_at and discharged_by
         await conn.query(
             `UPDATE ADMISSION
              SET status = 'Discharged',
                  discharged_at = NOW(),
+                 discharged_by = ?,
                  discharge_summary = ?
              WHERE admission_id = ?`,
-            [summaryText, adm.admission_id]
+            [req.session.user.id, summaryText, adm.admission_id]
         );
 
-        // 2. Release BED to Cleaning
+        // 2. If linked to an emergency case, update the related emergency encounter to Discharged if not already
+        if (adm.case_id) {
+            await conn.query(
+                `UPDATE EMERGENCY_CASE
+                 SET status = 'Discharged',
+                     discharged_at = COALESCE(discharged_at, NOW()),
+                     discharged_by = COALESCE(discharged_by, ?),
+                     discharge_summary = COALESCE(discharge_summary, ?)
+                 WHERE case_id = ?`,
+                [req.session.user.id, summaryText, adm.case_id]
+            );
+        }
+
+        // 3. Release BED to Cleaning (never directly Available)
         await conn.query("UPDATE BED SET status = 'Cleaning' WHERE bed_id = ?", [adm.bed_id]);
 
-        // 3. Finalize / update BILL with inpatient admission charge
+        // 4. Finalize / update BILL with inpatient admission charge using unique reference_key
         const days = Math.max(1, Math.ceil((Date.now() - new Date(adm.admitted_at).getTime()) / (1000 * 60 * 60 * 24)));
         const chargeAmount = room_fee !== undefined && Number(room_fee) >= 0
             ? Number(room_fee)
             : Number((days * Number(adm.daily_rate || 1000)).toFixed(2));
+        const chargeRefKey = `ADM-DISCHARGE-${adm.admission_id}`;
 
-        const [existingBills] = await conn.query(
-            `SELECT b.bill_id
-             FROM BILL b
-             JOIN vw_bill_summary vbs ON b.bill_id = vbs.bill_id
-             WHERE b.patient_id = ? AND vbs.payment_status <> 'Paid'
-             ORDER BY b.bill_date DESC LIMIT 1`,
-            [adm.patient_id]
+        const [[existingCharge]] = await conn.query(
+            'SELECT bill_item_id, bill_id FROM BILL_ITEM WHERE reference_key = ? LIMIT 1',
+            [chargeRefKey]
         );
 
         let billId;
-        if (existingBills.length) {
-            billId = existingBills[0].bill_id;
-            await conn.query('UPDATE BILL SET admission_id = COALESCE(admission_id, ?) WHERE bill_id = ?', [adm.admission_id, billId]);
+        if (existingCharge) {
+            billId = existingCharge.bill_id;
         } else {
-            const [billRes] = await conn.query(
-                'INSERT INTO BILL (patient_id, admission_id, bill_date, generated_by) VALUES (?, ?, NOW(), ?)',
-                [adm.patient_id, adm.admission_id, req.session.user.id]
+            const [existingBills] = await conn.query(
+                `SELECT b.bill_id
+                 FROM BILL b
+                 JOIN vw_bill_summary vbs ON b.bill_id = vbs.bill_id
+                 WHERE b.patient_id = ? AND vbs.payment_status <> 'Paid'
+                 ORDER BY b.bill_date DESC LIMIT 1 FOR UPDATE`,
+                [adm.patient_id]
             );
-            billId = billRes.insertId;
-        }
 
-        await conn.query(
-            'INSERT INTO BILL_ITEM (bill_id, item_type, description, amount) VALUES (?, ?, ?, ?)',
-            [billId, 'Admission', `Inpatient stay - ${adm.ward_name} (${adm.bed_number}, ${days} day(s))`, chargeAmount]
-        );
+            if (existingBills.length) {
+                billId = existingBills[0].bill_id;
+                await conn.query('UPDATE BILL SET admission_id = COALESCE(admission_id, ?) WHERE bill_id = ?', [adm.admission_id, billId]);
+            } else {
+                const [billRes] = await conn.query(
+                    'INSERT INTO BILL (patient_id, admission_id, bill_date, generated_by) VALUES (?, ?, NOW(), ?)',
+                    [adm.patient_id, adm.admission_id, req.session.user.id]
+                );
+                billId = billRes.insertId;
+            }
+
+            await conn.query(
+                'INSERT INTO BILL_ITEM (bill_id, item_type, description, amount, reference_key) VALUES (?, ?, ?, ?, ?)',
+                [billId, 'Admission', `Inpatient stay - ${adm.ward_name} (${adm.bed_number}, ${days} day(s))`, chargeAmount, chargeRefKey]
+            );
+        }
 
         // Record care note
         await conn.query(
@@ -304,12 +371,32 @@ router.post('/nurse/discharge-inpatient', requireRole('Admin', 'Nurse', 'Doctor'
             event_type: 'inpatient_discharged'
         });
 
+        await recordCrossDbOperation({
+            idempotency_key: `AUDIT-ADM-DISCHARGE-${adm.admission_id}`,
+            collection_name: 'audit_log',
+            operation_type: 'insert',
+            payload: {
+                user_id: req.session.user.id,
+                action: 'DISCHARGE inpatient',
+                table_affected: 'ADMISSION',
+                details: {
+                    admission_id: adm.admission_id,
+                    patient_id: adm.patient_id,
+                    bed_id: adm.bed_id,
+                    bill_id: billId,
+                    discharged_by: req.session.user.id
+                },
+                timestamp: new Date()
+            }
+        });
+
         res.json({
             message: 'Patient discharged, bill finalized, and bed released to Cleaning',
             admission_id: adm.admission_id,
             bill_id: billId,
             bed_id: adm.bed_id,
-            bed_status: 'Cleaning'
+            bed_status: 'Cleaning',
+            discharged_by: req.session.user.id
         });
     } catch (err) {
         await conn.rollback();
@@ -348,13 +435,22 @@ router.post('/nurse/beds/:id/mark-available', requireRole('Admin', 'Nurse'), asy
     }
 });
 
-// Record patient vitals
+// Record patient vitals (validates against configurable technical limits)
 router.post('/nurse/vitals', requireRole('Admin', 'Nurse'), async (req, res) => {
-    const { patient_id, case_id, bp_systolic, bp_diastolic, heart_rate, spo2, temperature, respiratory_rate, notes } = req.body;
+    const { patient_id, case_id, notes } = req.body;
 
     if (!patient_id && !case_id) {
         return res.status(400).json({ error: 'Patient ID or Emergency Case ID is required' });
     }
+
+    const validation = validateTriagePayload(req.body, { requireTriageFields: false });
+    if (!validation.valid) {
+        return res.status(400).json({
+            error: validation.errors[0],
+            validation_errors: validation.errors
+        });
+    }
+    const v = validation.normalized;
 
     try {
         await mysqlPool.query(
@@ -366,12 +462,12 @@ router.post('/nurse/vitals', requireRole('Admin', 'Nurse'), async (req, res) => 
                 patient_id ? Number(patient_id) : null,
                 case_id ? Number(case_id) : null,
                 req.session.user.id,
-                bp_systolic ? Number(bp_systolic) : null,
-                bp_diastolic ? Number(bp_diastolic) : null,
-                heart_rate ? Number(heart_rate) : null,
-                spo2 ? Number(spo2) : null,
-                temperature ? Number(temperature) : null,
-                respiratory_rate ? Number(respiratory_rate) : null,
+                v.bp_systolic,
+                v.bp_diastolic,
+                v.heart_rate,
+                v.spo2,
+                v.temperature,
+                v.respiratory_rate,
                 notes || null
             ]
         );
@@ -404,7 +500,7 @@ router.get('/nurse/vitals/:patientId', requireRole('Admin', 'Nurse', 'Doctor'), 
 router.post('/nurse/notes', requireRole('Admin', 'Nurse'), async (req, res) => {
     const { patient_id, case_id, bed_id, note_type = 'General', content } = req.body;
 
-    if (!content || !content.trim()) {
+    if (!content || typeof content !== 'string' || !content.trim()) {
         return res.status(400).json({ error: 'Note content is required' });
     }
 
@@ -526,6 +622,7 @@ router.get('/nurse/emergency-monitor', requireRole('Admin', 'Nurse'), async (req
                 ec.emg_number,
                 COALESCE(u.name, ec.temp_patient_name, 'Unidentified') AS patient_name,
                 ec.triage_priority,
+                ec.assessment_status,
                 ec.status,
                 ec.arrival_time,
                 TIMESTAMPDIFF(MINUTE, ec.arrival_time, NOW()) AS wait_minutes,
@@ -573,7 +670,7 @@ router.get('/nurse/notifications', requireRole('Admin', 'Nurse'), async (req, re
     }
 });
 
-// ---- Lab Technician: pending requests -> enter result -> generate report (MySQL + MongoDB lab_reports_raw) ----
+// ---- Lab Technician: pending requests -> enter result -> generate report (MySQL + MongoDB lab_reports_raw with durable outbox) ----
 router.get('/lab-tech/pending-requests', requireRole('Admin', 'Lab Technician'), async (req, res) => {
     const [rows] = await mysqlPool.query(
         `SELECT lr.request_id, lr.priority, lt.test_name, lt.test_category,
@@ -590,9 +687,18 @@ router.get('/lab-tech/pending-requests', requireRole('Admin', 'Lab Technician'),
 });
 
 router.post('/lab-tech/requests/:id/report', requireRole('Admin', 'Lab Technician'), async (req, res) => {
-    const { result_summary, parameters, findings, image_ref, data } = req.body;
-    if (!result_summary || !String(result_summary).trim()) {
+    const { result_summary, parameters, findings, image_ref, data, require_mongo_sync } = req.body;
+    if (!result_summary || typeof result_summary !== 'string' || !result_summary.trim()) {
         return res.status(400).json({ error: 'Result summary is required' });
+    }
+
+    // If caller explicitly requires immediate MongoDB availability, reject before committing MySQL
+    if (require_mongo_sync && !isMongoAvailable()) {
+        return res.status(503).json({
+            error: 'MongoDB document store is currently unavailable for raw laboratory parameter storage',
+            service: 'mongodb',
+            affected_functionality: 'lab_reports_raw'
+        });
     }
 
     const conn = await mysqlPool.getConnection();
@@ -618,7 +724,6 @@ router.post('/lab-tech/requests/:id/report', requireRole('Admin', 'Lab Technicia
             return res.status(409).json({ error: 'Lab report has already been submitted for this request' });
         }
 
-        // Ensure technician exists in STAFF (if Admin is submitting, fallback to lab tech staff_id or create record)
         let techId = req.session.user.id;
         const [[staffRow]] = await conn.query('SELECT staff_id FROM STAFF WHERE staff_id = ?', [techId]);
         if (!staffRow) {
@@ -633,7 +738,7 @@ router.post('/lab-tech/requests/:id/report', requireRole('Admin', 'Lab Technicia
         await conn.query("UPDATE LAB_REQUEST SET status='Completed' WHERE request_id=?", [req.params.id]);
         await conn.commit();
 
-        // Write structured report to MongoDB lab_reports_raw
+        // Write structured report to MongoDB lab_reports_raw via durable outbox
         const rawDoc = {
             request_id: Number(req.params.id),
             report_id: repIns.insertId,
@@ -648,28 +753,29 @@ router.post('/lab-tech/requests/:id/report', requireRole('Admin', 'Lab Technicia
             data: data || (Array.isArray(parameters) ? { parameters } : { summary: result_summary.trim() }),
             report_date: new Date()
         };
-        // Remove undefined keys
         Object.keys(rawDoc).forEach(k => rawDoc[k] === undefined && delete rawDoc[k]);
 
-        try {
-            const mongo = getMongo();
-            await mongo.collection('lab_reports_raw').updateOne(
-                { request_id: Number(req.params.id) },
-                { $set: rawDoc },
-                { upsert: true }
-            );
-            await mongo.collection('audit_log').insertOne({
+        const syncRes = await recordCrossDbOperation({
+            idempotency_key: `LAB-RAW-${req.params.id}`,
+            collection_name: 'lab_reports_raw',
+            operation_type: 'upsert',
+            filter: { request_id: Number(req.params.id) },
+            payload: rawDoc
+        });
+
+        await recordCrossDbOperation({
+            idempotency_key: `AUDIT-LAB-REPORT-${repIns.insertId}`,
+            collection_name: 'audit_log',
+            operation_type: 'insert',
+            payload: {
                 user_id: req.session.user.id,
                 action: 'INSERT lab report',
                 table_affected: 'LAB_REPORT',
                 details: { request_id: Number(req.params.id), report_id: repIns.insertId, test_name: reqMeta.test_name },
                 timestamp: new Date()
-            });
-        } catch (mongoErr) {
-            console.warn('MongoDB lab_reports_raw write failed (non-fatal):', mongoErr.message);
-        }
+            }
+        });
 
-        // Notify requesting doctor & patient
         await sendNotification({
             user_id: reqMeta.requested_by,
             message: `Lab report ready for ${reqMeta.test_name} (Request #${reqMeta.request_id}): ${result_summary.trim().slice(0, 120)}`,
@@ -682,9 +788,13 @@ router.post('/lab-tech/requests/:id/report', requireRole('Admin', 'Lab Technicia
         });
 
         res.status(201).json({
-            message: 'Report generated',
+            message: syncRes.synced
+                ? 'Report generated'
+                : 'Report saved in MySQL; structured MongoDB payload queued in CROSS_DB_OUTBOX for automatic sync',
             report_id: repIns.insertId,
-            request_id: Number(req.params.id)
+            request_id: Number(req.params.id),
+            mongo_sync_status: syncRes.status,
+            warning: syncRes.synced ? undefined : 'MongoDB was unreachable; raw payload safely queued in durable outbox'
         });
     } catch (err) {
         await conn.rollback();
@@ -737,6 +847,7 @@ router.get('/lab-tech/reports/:reportId', requireRole('Admin', 'Lab Technician',
         report.raw = raw || null;
     } catch (_) {
         report.raw = null;
+        report.mongo_degraded = true;
     }
     res.json(report);
 });
@@ -880,9 +991,11 @@ router.post('/pharmacist/dispense/:prescriptionId', requireRole('Admin', 'Pharma
 
         await conn.commit();
 
-        // Audit log in MongoDB
-        try {
-            await getMongo().collection('audit_log').insertOne({
+        await recordCrossDbOperation({
+            idempotency_key: `AUDIT-DISPENSE-${dispensingId}`,
+            collection_name: 'audit_log',
+            operation_type: 'insert',
+            payload: {
                 user_id: req.session.user.id,
                 action: 'DISPENSE prescription',
                 table_affected: 'PRESCRIPTION',
@@ -892,8 +1005,8 @@ router.post('/pharmacist/dispense/:prescriptionId', requireRole('Admin', 'Pharma
                     deductions: batchDeductions
                 },
                 timestamp: new Date()
-            });
-        } catch (_) {}
+            }
+        });
 
         res.json({
             message: 'Prescription dispensed, stock updated',
@@ -912,13 +1025,26 @@ router.post('/pharmacist/dispense/:prescriptionId', requireRole('Admin', 'Pharma
 router.post('/receptionist/register-patient', requireRole('Receptionist', 'Admin'), async (req, res) => {
     const { name, email, password, password_hash, phone, dob, gender, blood_group, address, emergency_contact, allergies } = req.body;
     const rawPassword = password || password_hash;
-    if (!name || !email || !rawPassword) {
+    if (!name || typeof name !== 'string' || !name.trim() || !email || typeof email !== 'string' || !email.trim() || !rawPassword || typeof rawPassword !== 'string') {
         return res.status(400).json({ error: 'Name, email, and password are required' });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+        return res.status(400).json({ error: 'Enter a valid email address' });
     }
 
     const conn = await mysqlPool.getConnection();
     try {
         await conn.beginTransaction();
+
+        // Prevent duplicate patient registration by email
+        const [existing] = await conn.query('SELECT user_id FROM `USER` WHERE email = ? FOR UPDATE', [normalizedEmail]);
+        if (existing.length > 0) {
+            await conn.rollback();
+            return res.status(409).json({ error: 'A patient or user with this email is already registered' });
+        }
+
         const hashedPassword = String(rawPassword).startsWith('$2')
             ? String(rawPassword)
             : await bcrypt.hash(String(rawPassword), 10);
@@ -926,7 +1052,7 @@ router.post('/receptionist/register-patient', requireRole('Receptionist', 'Admin
         const [roleRow] = await conn.query("SELECT role_id FROM ROLE WHERE role_name='Patient'");
         const [userResult] = await conn.query(
             'INSERT INTO `USER` (name, email, password_hash, phone, role_id) VALUES (?, ?, ?, ?, ?)',
-            [name.trim(), email.trim(), hashedPassword, phone || null, roleRow[0].role_id]
+            [name.trim(), normalizedEmail, hashedPassword, phone || null, roleRow[0].role_id]
         );
 
         const normalizedGender = ['M', 'F', 'O'].includes(gender) ? gender : (gender === 'Other' ? 'O' : 'O');
@@ -952,6 +1078,9 @@ router.post('/receptionist/register-patient', requireRole('Receptionist', 'Admin
         res.status(201).json({ patient_id: userResult.insertId });
     } catch (err) {
         await conn.rollback();
+        if (err && err.code === 'ER_DUP_ENTRY') {
+            return res.status(409).json({ error: 'A patient or user with this email is already registered' });
+        }
         res.status(500).json({ error: 'Failed to register patient: ' + err.message });
     } finally {
         conn.release();
@@ -1050,8 +1179,11 @@ router.post('/receptionist/appointments/:id/cancel', requireRole('Receptionist',
         );
         await conn.commit();
 
-        try {
-            await getMongo().collection('audit_log').insertOne({
+        await recordCrossDbOperation({
+            idempotency_key: `AUDIT-APPT-CANCEL-${appointmentId}`,
+            collection_name: 'audit_log',
+            operation_type: 'insert',
+            payload: {
                 user_id: req.session.user.id,
                 action: 'CANCEL appointment',
                 table_affected: 'APPOINTMENT',
@@ -1063,8 +1195,8 @@ router.post('/receptionist/appointments/:id/cancel', requireRole('Receptionist',
                     appointment_time: appt.appointment_time
                 },
                 timestamp: new Date()
-            });
-        } catch (_) {}
+            }
+        });
 
         res.json({ message: 'Appointment cancelled', appointment_id: appointmentId, status: 'Cancelled' });
     } catch (err) {
@@ -1119,9 +1251,6 @@ router.post('/receptionist/appointments/:id/reschedule', requireRole('Receptioni
             [appointmentId]
         );
 
-        // Reuse sp_book_appointment for the new slot inside the same connection/transaction.
-        // If sp_book_appointment fails (e.g. slot already taken), its handler rolls back the entire transaction
-        // including the status = 'Cancelled' update on the original appointment!
         await conn.query(
             'CALL sp_book_appointment(?, ?, ?, ?, ?, ?)',
             [appt.patient_id, targetDoctorId, appt.department_id, appointment_date, appointment_time, req.session.user.id]
@@ -1138,8 +1267,11 @@ router.post('/receptionist/appointments/:id/reschedule', requireRole('Receptioni
 
         await conn.commit();
 
-        try {
-            await getMongo().collection('audit_log').insertOne({
+        await recordCrossDbOperation({
+            idempotency_key: `AUDIT-APPT-RESCHED-${appointmentId}-${newAppt ? newAppt.appointment_id : Date.now()}`,
+            collection_name: 'audit_log',
+            operation_type: 'insert',
+            payload: {
                 user_id: req.session.user.id,
                 action: 'RESCHEDULE appointment',
                 table_affected: 'APPOINTMENT',
@@ -1154,8 +1286,8 @@ router.post('/receptionist/appointments/:id/reschedule', requireRole('Receptioni
                     new_time: appointment_time
                 },
                 timestamp: new Date()
-            });
-        } catch (_) {}
+            }
+        });
 
         res.status(201).json({
             message: 'Appointment rescheduled',

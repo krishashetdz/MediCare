@@ -1,8 +1,9 @@
 const express = require('express');
 const router = express.Router();
-const { mysqlPool, getMongo } = require('../config/db');
+const { mysqlPool } = require('../config/db');
 const { requireRole, requireAuth } = require('../middleware/auth');
 const { sendNotification } = require('../services/notificationService');
+const { recordCrossDbOperation } = require('../services/crossDbSync');
 
 router.use(requireRole('Admin', 'Receptionist', 'Doctor', 'Patient'));
 
@@ -37,11 +38,6 @@ async function canAccessBill(user, bill) {
     }
     return false;
 }
-
-/* ============================================================
-   Billing routes — invoice view + items + payment & receipt recording.
-   Open to Admin, Receptionist, Doctor (their bills), Patient (own bills).
-   ============================================================ */
 
 router.get('/', requireAuth, async (req, res) => {
     try {
@@ -90,9 +86,8 @@ router.get('/:billId', requireAuth, async (req, res) => {
 
         const bill = rows[0];
         const allowed = await canAccessBill(req.session.user, bill);
-        if (!allowed) return res.status(404).json({ error: 'Bill not found' });
+        if (!allowed) return res.status(403).json({ error: 'Access denied: you are not authorized to view this bill' });
 
-        // Also include payments/receipts history on the bill detail payload
         const [payments] = await mysqlPool.query(
             `SELECT pm.payment_id, pm.bill_id, pm.amount_paid, pm.payment_method,
                     pm.reference_no, pm.receipt_number, pm.paid_at, pm.received_by,
@@ -120,10 +115,10 @@ router.get('/:billId/items', requireAuth, async (req, res) => {
         if (!billCheck.length) return res.status(404).json({ error: 'Bill not found' });
 
         const allowed = await canAccessBill(req.session.user, billCheck[0]);
-        if (!allowed) return res.status(404).json({ error: 'Bill not found' });
+        if (!allowed) return res.status(403).json({ error: 'Access denied: you are not authorized to view this bill' });
 
         const [rows] = await mysqlPool.query(
-            `SELECT bill_item_id, item_type, description, amount
+            `SELECT bill_item_id, item_type, description, amount, reference_key
              FROM BILL_ITEM WHERE bill_id = ?
              ORDER BY bill_item_id`,
             [req.params.billId]
@@ -134,7 +129,6 @@ router.get('/:billId/items', requireAuth, async (req, res) => {
     }
 });
 
-// List payments / receipts for an invoice
 router.get('/:billId/payments', requireAuth, async (req, res) => {
     try {
         const [billCheck] = await mysqlPool.query(
@@ -144,7 +138,7 @@ router.get('/:billId/payments', requireAuth, async (req, res) => {
         if (!billCheck.length) return res.status(404).json({ error: 'Bill not found' });
 
         const allowed = await canAccessBill(req.session.user, billCheck[0]);
-        if (!allowed) return res.status(404).json({ error: 'Bill not found' });
+        if (!allowed) return res.status(403).json({ error: 'Access denied: you are not authorized to view this bill' });
 
         const [payments] = await mysqlPool.query(
             `SELECT pm.payment_id, pm.bill_id, pm.amount_paid, pm.payment_method,
@@ -162,7 +156,6 @@ router.get('/:billId/payments', requireAuth, async (req, res) => {
     }
 });
 
-// Record a payment (Partial or Full/Paid) and generate a receipt
 router.post('/:billId/payments', requireRole('Admin', 'Receptionist'), async (req, res) => {
     const { amount_paid, amount, payment_method = 'Cash', reference_no = null } = req.body;
     const payAmount = Number(amount_paid !== undefined ? amount_paid : amount);
@@ -185,13 +178,25 @@ router.post('/:billId/payments', requireRole('Admin', 'Receptionist'), async (re
             return res.status(404).json({ error: 'Bill not found' });
         }
 
+        // Prevent duplicate payment submission with identical reference_no on the same bill
+        if (reference_no && String(reference_no).trim()) {
+            const [[dupRef]] = await conn.query(
+                'SELECT payment_id, receipt_number FROM PAYMENT WHERE bill_id = ? AND reference_no = ? LIMIT 1',
+                [req.params.billId, String(reference_no).trim()]
+            );
+            if (dupRef) {
+                await conn.rollback();
+                return res.status(409).json({
+                    error: `A payment with reference_no '${String(reference_no).trim()}' has already been recorded for this bill (Receipt ${dupRef.receipt_number})`
+                });
+            }
+        }
+
         const [[summary]] = await conn.query(
             'SELECT * FROM vw_bill_summary WHERE bill_id = ?',
             [req.params.billId]
         );
 
-        const totalAmount = Number(summary.total_amount || 0);
-        const alreadyPaid = Number(summary.paid_amount || 0);
         const balanceDue = Number(summary.balance_due || 0);
 
         if (summary.payment_status === 'Paid' || balanceDue <= 0) {
@@ -214,7 +219,7 @@ router.post('/:billId/payments', requireRole('Admin', 'Receptionist'), async (re
         const [ins] = await conn.query(
             `INSERT INTO PAYMENT (bill_id, amount_paid, payment_method, reference_no, receipt_number, paid_at, received_by)
              VALUES (?, ?, ?, ?, ?, NOW(), ?)`,
-            [req.params.billId, payAmount.toFixed(2), method, reference_no || null, receiptNumber, req.session.user.id]
+            [req.params.billId, payAmount.toFixed(2), method, reference_no ? String(reference_no).trim() : null, receiptNumber, req.session.user.id]
         );
 
         const [[updatedBill]] = await conn.query(
@@ -235,17 +240,17 @@ router.post('/:billId/payments', requireRole('Admin', 'Receptionist'), async (re
 
         await conn.commit();
 
-        // Notify patient of payment & receipt
         await sendNotification({
             user_id: updatedBill.patient_id,
             message: `Payment of ₹${payAmount.toFixed(2)} received for Bill #${updatedBill.bill_id} (Receipt ${receiptNumber}). Status: ${updatedBill.payment_status}.`,
             event_type: 'payment_received'
         });
 
-        // Audit log in MongoDB
-        try {
-            const mongo = getMongo();
-            await mongo.collection('audit_log').insertOne({
+        await recordCrossDbOperation({
+            idempotency_key: `AUDIT-PAYMENT-${ins.insertId}`,
+            collection_name: 'audit_log',
+            operation_type: 'insert',
+            payload: {
                 user_id: req.session.user.id,
                 action: 'RECORD payment',
                 table_affected: 'PAYMENT',
@@ -259,8 +264,8 @@ router.post('/:billId/payments', requireRole('Admin', 'Receptionist'), async (re
                     balance_due: Number(updatedBill.balance_due)
                 },
                 timestamp: new Date()
-            });
-        } catch (_) {}
+            }
+        });
 
         res.status(201).json({
             message: `Payment recorded (${updatedBill.payment_status}). Receipt ${receiptNumber} generated.`,

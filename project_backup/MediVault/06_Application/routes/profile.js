@@ -9,6 +9,9 @@ router.use(requireAuth);
 // Change password
 router.post('/change-password', async (req, res) => {
     const { current_password, new_password } = req.body;
+    if (!current_password || typeof current_password !== 'string' || !new_password || typeof new_password !== 'string' || new_password.length < 4) {
+        return res.status(400).json({ error: 'Current password and a valid new password (min 4 characters) are required' });
+    }
     const userId = req.session.user.id;
 
     try {
@@ -28,7 +31,7 @@ router.post('/change-password', async (req, res) => {
 
         res.json({ message: 'Password updated' });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: 'Could not update password' });
     }
 });
 
