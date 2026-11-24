@@ -250,6 +250,7 @@ BEGIN
     DECLARE v_consultation_id INT;
     DECLARE v_fee DECIMAL(8,2);
     DECLARE v_bill_id INT;
+    DECLARE v_existing_bill_id INT DEFAULT NULL;
 
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
@@ -269,25 +270,34 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No consultation on record for this appointment yet';
     END IF;
 
-    SELECT consultation_fee INTO v_fee FROM DOCTOR WHERE doctor_id = v_doctor_id;
+    SELECT bill_id INTO v_existing_bill_id
+    FROM BILL
+    WHERE appointment_id = p_appointment_id
+    ORDER BY bill_id DESC
+    LIMIT 1
+    FOR UPDATE;
 
-    INSERT INTO BILL (patient_id, appointment_id, generated_by)
-    VALUES (v_patient_id, p_appointment_id, p_generated_by);
-    SET v_bill_id = LAST_INSERT_ID();
+    IF v_existing_bill_id IS NULL THEN
+        SELECT consultation_fee INTO v_fee FROM DOCTOR WHERE doctor_id = v_doctor_id;
 
-    INSERT INTO BILL_ITEM (bill_id, item_type, description, amount)
-    VALUES (v_bill_id, 'Consultation', 'Doctor consultation fee', v_fee);
+        INSERT INTO BILL (patient_id, appointment_id, generated_by)
+        VALUES (v_patient_id, p_appointment_id, p_generated_by);
+        SET v_bill_id = LAST_INSERT_ID();
 
-    INSERT INTO BILL_ITEM (bill_id, item_type, description, amount)
-    SELECT v_bill_id, 'Lab', lt.test_name, lt.price
-    FROM LAB_REQUEST lr JOIN LAB_TEST lt ON lr.test_id = lt.test_id
-    WHERE lr.consultation_id = v_consultation_id;
+        INSERT INTO BILL_ITEM (bill_id, item_type, description, amount, reference_key)
+        VALUES (v_bill_id, 'Consultation', 'Doctor consultation fee', v_fee, CONCAT('APPT-CONSULT-', p_appointment_id));
 
-    INSERT INTO BILL_ITEM (bill_id, item_type, description, amount)
-    SELECT v_bill_id, 'Medicine', m.medicine_name, m.unit_price * pi.quantity
-    FROM PRESCRIPTION pr JOIN PRESCRIPTION_ITEM pi ON pr.prescription_id = pi.prescription_id
-    JOIN MEDICINE m ON pi.medicine_id = m.medicine_id
-    WHERE pr.consultation_id = v_consultation_id;
+        INSERT INTO BILL_ITEM (bill_id, item_type, description, amount, reference_key)
+        SELECT v_bill_id, 'Lab', lt.test_name, lt.price, CONCAT('LAB-REQ-', lr.request_id)
+        FROM LAB_REQUEST lr JOIN LAB_TEST lt ON lr.test_id = lt.test_id
+        WHERE lr.consultation_id = v_consultation_id;
+
+        INSERT INTO BILL_ITEM (bill_id, item_type, description, amount, reference_key)
+        SELECT v_bill_id, 'Medicine', m.medicine_name, m.unit_price * pi.quantity, CONCAT('RX-ITEM-', pi.item_id)
+        FROM PRESCRIPTION pr JOIN PRESCRIPTION_ITEM pi ON pr.prescription_id = pi.prescription_id
+        JOIN MEDICINE m ON pi.medicine_id = m.medicine_id
+        WHERE pr.consultation_id = v_consultation_id;
+    END IF;
 
     COMMIT;
 END$$

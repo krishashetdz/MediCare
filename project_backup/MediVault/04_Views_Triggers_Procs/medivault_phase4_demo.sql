@@ -1,18 +1,20 @@
 -- ============================================================
 -- MediVault -- Phase 4 DEMO (Normalized 3NF Schema)
 -- Exercises every view/trigger/procedure against the live 3NF dataset
+-- Safe for MySQL Workbench (SQL_SAFE_UPDATES = 1 compliant)
 -- ============================================================
 USE medivault;
 
 -- ---------------------------------------------------------------
--- DEMO 1: low-stock view + restocking MEDICINE_BATCH
+-- DEMO 1: low-stock view + restocking active MEDICINE_BATCH (PK)
 -- ---------------------------------------------------------------
 SELECT 'BEFORE: low-stock list' AS step;
 SELECT * FROM vw_pharmacy_low_stock;
 
-UPDATE MEDICINE_BATCH SET available_qty = available_qty + 100 WHERE medicine_id = 5;
+-- Target active batch_id = 5 (BATCH-METF-2027A) by primary key so expired batch_id = 9 is untouched
+UPDATE MEDICINE_BATCH SET available_qty = available_qty + 100 WHERE batch_id = 5;
 
-SELECT 'AFTER: MEDICINE_BATCH updated, reflected in vw_medicine_inventory' AS step;
+SELECT 'AFTER: active MEDICINE_BATCH updated, reflected in vw_medicine_inventory' AS step;
 SELECT medicine_id, medicine_name, stock_qty FROM vw_medicine_inventory WHERE medicine_id = 5;
 SELECT 'AFTER: Metformin drops out of the low-stock view (no longer < 20)' AS step;
 SELECT * FROM vw_pharmacy_low_stock;
@@ -33,7 +35,8 @@ SELECT * FROM NOTIFICATION WHERE user_id = 7;
 -- ---------------------------------------------------------------
 -- DEMO 3: trg_update_stock -> chains into trg_low_stock_alert
 -- ---------------------------------------------------------------
-UPDATE MEDICINE_BATCH SET available_qty = 25 WHERE medicine_id = 7;
+-- Target Pantoprazole active batch_id = 7 by primary key (Safe Update Mode compliant)
+UPDATE MEDICINE_BATCH SET available_qty = 25 WHERE batch_id = 7;
 
 INSERT INTO PRESCRIPTION (consultation_id, status)
 VALUES (2, 'Pending');
@@ -71,18 +74,21 @@ SELECT bill_id, total_amount, payment_status FROM vw_bill_summary WHERE bill_id 
 
 INSERT INTO BILL_ITEM (bill_id, item_type, description, amount) VALUES (@new_bill_id, 'Lab', 'CBC', 350.00);
 INSERT INTO BILL_ITEM (bill_id, item_type, description, amount) VALUES (@new_bill_id, 'Medicine', 'Paracetamol', 50.00);
+SET @med_bill_item_id = LAST_INSERT_ID();
 
 SELECT 'AFTER two inserts: total_amount computed as 400' AS step;
 SELECT bill_id, total_amount, payment_status FROM vw_bill_summary WHERE bill_id = @new_bill_id;
 
-DELETE FROM BILL_ITEM WHERE bill_id = @new_bill_id AND item_type = 'Medicine';
+-- Delete by primary key (bill_item_id) for MySQL Workbench Safe Update Mode compatibility
+DELETE FROM BILL_ITEM WHERE bill_item_id = @med_bill_item_id;
 
 SELECT 'AFTER deleting one item: total_amount drops to 350' AS step;
 SELECT bill_id, total_amount, payment_status FROM vw_bill_summary WHERE bill_id = @new_bill_id;
 
 -- ---------------------------------------------------------------
--- DEMO 5: trg_block_patient_delete
+-- DEMO 5: trg_block_patient_delete (allowed + blocked cases)
 -- ---------------------------------------------------------------
+-- 5a. Allowed case: deleting a patient with zero unpaid bills succeeds
 INSERT INTO `USER` (name, email, password_hash, phone, role_id)
 VALUES ('Test Delete', 'test.delete@example.com', '$2a$10$v1L1KWnJoT52YPFjadbqQOYeEifxGzBaQwu45Y97whb1IOS7r57cW', '9000000001', 3);
 SET @test_uid = LAST_INSERT_ID();
@@ -91,6 +97,25 @@ INSERT INTO PATIENT (patient_id, gender) VALUES (@test_uid, 'M');
 SELECT 'Deleting a patient with zero bills succeeds' AS step;
 DELETE FROM PATIENT WHERE patient_id = @test_uid;
 DELETE FROM `USER` WHERE user_id = @test_uid;
+
+-- 5b. Blocked case: attempting to delete patient_id = 6 (Priya Nair, unpaid Bill #2)
+-- To screenshot the raw red MySQL Error 1644 in Workbench, highlight and run only the next line:
+-- DELETE FROM PATIENT WHERE patient_id = 6;
+
+DROP PROCEDURE IF EXISTS sp_demo_block_patient_delete;
+DELIMITER $$
+CREATE PROCEDURE sp_demo_block_patient_delete()
+BEGIN
+    DECLARE v_blocked INT DEFAULT 0;
+    DECLARE CONTINUE HANDLER FOR SQLSTATE '45000' SET v_blocked = 1;
+    DELETE FROM PATIENT WHERE patient_id = 6;
+    IF v_blocked = 1 THEN
+        SELECT 'BLOCKED by trg_block_patient_delete: Cannot delete patient 6 (unpaid bills exist)' AS step;
+    END IF;
+END$$
+DELIMITER ;
+CALL sp_demo_block_patient_delete();
+DROP PROCEDURE sp_demo_block_patient_delete;
 
 -- ---------------------------------------------------------------
 -- DEMO 6: sp_book_appointment
