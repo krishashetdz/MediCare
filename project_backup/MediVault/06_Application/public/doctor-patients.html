@@ -14,12 +14,30 @@
 </head>
 <body>
 <div class="mv-layout" id="mvShell"></div>
+
+<div class="modal fade" id="patientHistoryModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="phModalTitle">Patient Clinical History</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="phModalBody"></div>
+      <div class="modal-footer">
+        <button type="button" class="mv-btn mv-btn-outline" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
 <script src="/assets/js/mv-core.js"></script>
 <script src="/assets/js/mv-shell.js"></script>
 <script>
 (function () {
     'use strict';
+    let historyModal;
+
     (async function init() {
         const ctx = await MV.shell.mount({ roles: ['Doctor'], title: 'My Patients', subtitle: 'Patients seen across all consultations' });
 
@@ -32,6 +50,7 @@
             '</div>' +
             '<div class="mv-footer">MediCare - Hospital Management System</div>';
 
+        historyModal = new bootstrap.Modal(document.getElementById('patientHistoryModal'));
         document.getElementById('refreshBtn').addEventListener('click', function () { table.reload(); });
 
         const table = new MV.DataTable(document.getElementById('myPatientSlot'), {
@@ -44,9 +63,43 @@
                 { key: 'status', label: 'Status', render: function (r) { return MV.badge(r.status); } }
             ],
             fetch: function () { return MV.api.get('/api/doctor/my-patients'); },
+            rowActions: function (r) {
+                return '<button type="button" class="mv-btn mv-btn-outline mv-btn-sm" data-view-patient="' + r.patient_id + '" data-patient-name="' + MV.esc(r.patient_name) + '">View History</button>';
+            },
             searchKeys: ['patient_name', 'patient_email', 'patient_phone'],
             pageSize: 15,
             searchPlaceholder: 'Search patients...'
+        });
+
+        document.getElementById('myPatientSlot').addEventListener('click', async function (e) {
+            const btn = e.target.closest('[data-view-patient]');
+            if (!btn) return;
+            const pid = btn.getAttribute('data-view-patient');
+            const pname = btn.getAttribute('data-patient-name') || 'Patient';
+            document.getElementById('phModalTitle').textContent = 'Clinical History · ' + pname;
+            const body = document.getElementById('phModalBody');
+            body.innerHTML = '<div class="text-center py-4"><div class="spinner-border spinner-border-sm"></div></div>';
+            historyModal.show();
+            try {
+                const h = await MV.api.get('/api/doctor/patients/' + pid + '/history');
+                const pt = h.patient || {};
+                const records = h.records || [];
+                const consults = h.consultations || [];
+                const labs = h.lab_reports || [];
+                body.innerHTML =
+                    '<div class="mb-3 p-3 border rounded" style="background:var(--mv-surface-1)">' +
+                      '<div><strong>Blood Group:</strong> ' + MV.esc(pt.blood_group || '--') + ' &bull; <strong>Gender:</strong> ' + MV.esc(pt.gender || '--') + ' &bull; <strong>Phone:</strong> ' + MV.esc(pt.phone || '--') + '</div>' +
+                      '<div class="mt-1"><strong>Allergies:</strong> ' + MV.esc(pt.allergies || 'None recorded') + '</div>' +
+                    '</div>' +
+                    '<h6>Medical Records (' + records.length + ')</h6>' +
+                    (records.length ? '<ul class="mb-3">' + records.map(r => '<li>' + MV.esc(r.diagnosis_summary) + ' <small class="text-muted">(' + MV.fmt.date(r.created_at) + ')</small></li>').join('') + '</ul>' : '<p class="text-muted">No medical records.</p>') +
+                    '<h6>Consultations (' + consults.length + ')</h6>' +
+                    (consults.length ? '<ul class="mb-3">' + consults.map(c => '<li><strong>' + MV.esc(c.diagnosis || '--') + '</strong> — ' + MV.esc(c.symptoms || '') + '</li>').join('') + '</ul>' : '<p class="text-muted">No prior consultations.</p>') +
+                    '<h6>Lab Reports (' + labs.length + ')</h6>' +
+                    (labs.length ? '<ul>' + labs.map(l => '<li><strong>' + MV.esc(l.test_name) + ':</strong> ' + MV.esc(l.result_summary || l.status) + '</li>').join('') + '</ul>' : '<p class="text-muted mb-0">No lab reports.</p>');
+            } catch (err) {
+                body.innerHTML = '<p class="text-danger mb-0">' + MV.esc(err.message) + '</p>';
+            }
         });
     })();
 })();

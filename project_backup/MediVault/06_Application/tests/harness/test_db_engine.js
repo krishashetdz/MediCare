@@ -2736,7 +2736,7 @@ function createInMemoryMysqlPool() {
             }
             return [rows];
         }
-        if (norm.includes("FROM EMERGENCY_CASE WHERE status NOT IN ('Discharged', 'Transferred')")) {
+        if (norm.includes("FROM EMERGENCY_CASE") && norm.includes("status NOT IN ('Discharged', 'Transferred')")) {
             const active = state.tables.EMERGENCY_CASE.filter(c => !['Discharged', 'Transferred'].includes(c.status));
             if (norm.includes("triage_priority = 'P1'")) {
                 return [[{ total: active.filter(c => c.triage_priority === 'P1').length }]];
@@ -2820,6 +2820,113 @@ function createInMemoryMysqlPool() {
                 s.is_on_duty = Boolean(onDuty);
             });
             return [{ affectedRows: 1 }];
+        }
+
+        if (norm.includes('FROM APPOINTMENT a JOIN PATIENT p ON a.patient_id = p.patient_id') && norm.includes('JOIN DEPARTMENT dep ON doc.department_id = dep.department_id')) {
+            const hasStatus = norm.includes('WHERE a.status = ?');
+            const statusFilter = hasStatus ? params[0] : null;
+            const limit = Number(params[hasStatus ? 1 : 0] || 50);
+            let rows = state.tables.APPOINTMENT.map(a => {
+                const up = state.tables.USER.find(u => Number(u.user_id) === Number(a.patient_id)) || {};
+                const doc = state.tables.DOCTOR.find(d => Number(d.doctor_id) === Number(a.doctor_id)) || {};
+                const ud = state.tables.USER.find(u => Number(u.user_id) === Number(a.doctor_id)) || {};
+                const dep = state.tables.DEPARTMENT.find(dp => Number(dp.department_id) === Number(doc.department_id)) || {};
+                return {
+                    appointment_id: a.appointment_id,
+                    patient_name: up.name || '',
+                    doctor_name: ud.name || '',
+                    department_name: dep.department_name || '',
+                    appointment_date: a.appointment_date,
+                    appointment_time: a.appointment_time,
+                    status: a.status,
+                    created_at: a.created_at || ''
+                };
+            });
+            if (statusFilter) rows = rows.filter(r => r.status === statusFilter);
+            rows.sort((a, b) => Number(b.appointment_id) - Number(a.appointment_id));
+            return [rows.slice(0, limit)];
+        }
+
+        if (norm.includes('FROM DEPARTMENT d LEFT JOIN DOCTOR hod ON d.hod_doctor_id = hod.doctor_id')) {
+            const rows = state.tables.DEPARTMENT.map(d => {
+                const u = d.hod_doctor_id ? state.tables.USER.find(x => Number(x.user_id) === Number(d.hod_doctor_id)) : null;
+                const doctorCount = state.tables.DOCTOR.filter(doc => Number(doc.department_id) === Number(d.department_id)).length;
+                return {
+                    department_id: d.department_id,
+                    department_name: d.department_name,
+                    floor_no: d.floor_no,
+                    hod_name: u ? u.name : null,
+                    doctor_count: doctorCount
+                };
+            }).sort((a, b) => String(a.department_name).localeCompare(String(b.department_name)));
+            return [rows];
+        }
+
+        if (norm.includes('FROM `USER` u JOIN ROLE r ON u.role_id = r.role_id WHERE u.user_id = ?')) {
+            const uid = Number(params[0]);
+            const u = state.tables.USER.find(x => Number(x.user_id) === uid);
+            if (!u) return [[]];
+            const r = state.tables.ROLE.find(x => Number(x.role_id) === Number(u.role_id)) || {};
+            return [[{
+                user_id: u.user_id,
+                name: u.name,
+                email: u.email,
+                phone: u.phone || null,
+                role_name: r.role_name || null
+            }]];
+        }
+
+        if (norm.includes('FROM PATIENT WHERE patient_id = ?')) {
+            const p = state.tables.PATIENT.find(x => Number(x.patient_id) === Number(params[0]));
+            return [p ? [p] : []];
+        }
+
+        if (norm.includes('FROM DOCTOR d JOIN DEPARTMENT dept ON d.department_id = dept.department_id WHERE d.doctor_id = ?')) {
+            const d = state.tables.DOCTOR.find(x => Number(x.doctor_id) === Number(params[0]));
+            if (!d) return [[]];
+            const dept = state.tables.DEPARTMENT.find(x => Number(x.department_id) === Number(d.department_id)) || {};
+            return [[{
+                specialization: d.specialization,
+                qualification: d.qualification,
+                consultation_fee: d.consultation_fee,
+                department_name: dept.department_name || null
+            }]];
+        }
+
+        if (norm.includes('FROM STAFF s LEFT JOIN DEPARTMENT dept ON s.department_id = dept.department_id WHERE s.staff_id = ?')) {
+            const s = state.tables.STAFF.find(x => Number(x.staff_id) === Number(params[0]));
+            if (!s) return [[]];
+            const dept = s.department_id ? state.tables.DEPARTMENT.find(x => Number(x.department_id) === Number(s.department_id)) : null;
+            return [[{
+                staff_type: s.staff_type,
+                shift: s.shift,
+                department_name: dept ? dept.department_name : null
+            }]];
+        }
+
+        if (norm === 'UPDATE `USER` SET phone = ? WHERE user_id = ?') {
+            const u = state.tables.USER.find(x => Number(x.user_id) === Number(params[1]));
+            if (u) u.phone = params[0];
+            return [{ affectedRows: u ? 1 : 0 }];
+        }
+
+        if (norm === 'UPDATE PATIENT SET address = ?, emergency_contact = ? WHERE patient_id = ?') {
+            const p = state.tables.PATIENT.find(x => Number(x.patient_id) === Number(params[2]));
+            if (p) {
+                p.address = params[0];
+                p.emergency_contact = params[1];
+            }
+            return [{ affectedRows: p ? 1 : 0 }];
+        }
+
+        if (norm.startsWith('UPDATE DOCTOR SET specialization=?, qualification=?, consultation_fee=? WHERE doctor_id=?')) {
+            const d = state.tables.DOCTOR.find(x => Number(x.doctor_id) === Number(params[3]));
+            if (d) {
+                d.specialization = params[0];
+                d.qualification = params[1];
+                d.consultation_fee = Number(params[2]);
+            }
+            return [{ affectedRows: d ? 1 : 0 }];
         }
 
         return [[]];

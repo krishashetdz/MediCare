@@ -242,6 +242,36 @@
     </div>
 </div>
 
+<!-- Discharge Inpatient Modal -->
+<div class="modal fade" id="nurseDischargeModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="fas fa-door-open text-danger me-2"></i>Discharge Inpatient</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="nurseDischargeForm">
+                    <input type="hidden" id="ndAdmissionId" name="admission_id">
+                    <input type="hidden" id="ndBedId" name="bed_id">
+                    <div class="mb-3">
+                        <label class="form-label">Patient</label>
+                        <input type="text" class="form-control" id="ndPatientName" readonly>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Clinical Discharge Summary <span class="text-danger">*</span></label>
+                        <textarea class="form-control" id="ndSummary" name="discharge_summary" rows="3" required></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="mv-btn mv-btn-outline" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="mv-btn mv-btn-danger" id="confirmNurseDischargeBtn">Confirm Discharge</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
 <script src="/assets/js/mv-core.js"></script>
 <script src="/assets/js/mv-shell.js"></script>
@@ -261,7 +291,7 @@
     let inventory = [];
 
     // Modals
-    let nurseVitalsModalInst, nurseNotesModalInst, nurseTransferModalInst, assignAdmissionBedModalInst;
+    let nurseVitalsModalInst, nurseNotesModalInst, nurseTransferModalInst, assignAdmissionBedModalInst, nurseDischargeModalInst;
 
     (async function init() {
         const ctx = await MV.shell.mount({
@@ -434,6 +464,7 @@
         nurseNotesModalInst = new bootstrap.Modal(document.getElementById('nurseNotesModal'));
         nurseTransferModalInst = new bootstrap.Modal(document.getElementById('nurseTransferModal'));
         assignAdmissionBedModalInst = new bootstrap.Modal(document.getElementById('assignAdmissionBedModal'));
+        nurseDischargeModalInst = new bootstrap.Modal(document.getElementById('nurseDischargeModal'));
 
         // Submit Vitals
         document.getElementById('submitNurseVitalsBtn').addEventListener('click', async function () {
@@ -498,6 +529,28 @@
                 const res = await MV.api.post('/api/staff/nurse/assign-admission-bed', data);
                 MV.toast({ message: res.message, type: 'success' });
                 assignAdmissionBedModalInst.hide();
+                renderNursePatients();
+            } catch (err) {
+                MV.toast({ message: err.message, type: 'danger' });
+            } finally {
+                restore();
+            }
+        });
+
+        // Submit Inpatient Discharge
+        document.getElementById('confirmNurseDischargeBtn').addEventListener('click', async function () {
+            const form = document.getElementById('nurseDischargeForm');
+            if (!form.checkValidity()) return form.reportValidity();
+            const data = Object.fromEntries(new FormData(form));
+            const restore = MV.pending(this, 'Discharging...');
+            try {
+                const res = await MV.api.post('/api/staff/nurse/discharge-inpatient', {
+                    admission_id: Number(data.admission_id),
+                    bed_id: Number(data.bed_id),
+                    discharge_summary: data.discharge_summary
+                });
+                MV.toast({ message: res.message, type: 'success' });
+                nurseDischargeModalInst.hide();
                 renderNursePatients();
             } catch (err) {
                 MV.toast({ message: err.message, type: 'danger' });
@@ -869,20 +922,12 @@
         board.innerHTML = html;
     }
 
-    window.dischargeInpatient = async function (admissionId, bedId, patientName) {
-        const summary = window.prompt('Enter discharge clinical summary for ' + patientName + ':', 'Patient discharged in stable condition.');
-        if (!summary) return;
-        try {
-            const res = await MV.api.post('/api/staff/nurse/discharge-inpatient', {
-                admission_id: admissionId,
-                bed_id: bedId,
-                discharge_summary: summary
-            });
-            MV.toast({ message: res.message, type: 'success' });
-            renderNursePatients();
-        } catch (err) {
-            MV.toast({ message: err.message, type: 'danger' });
-        }
+    window.dischargeInpatient = function (admissionId, bedId, patientName) {
+        document.getElementById('ndAdmissionId').value = admissionId;
+        document.getElementById('ndBedId').value = bedId;
+        document.getElementById('ndPatientName').value = patientName;
+        document.getElementById('ndSummary').value = 'Patient discharged in stable condition.';
+        nurseDischargeModalInst.show();
     };
 
     window.viewBed = async function (bedNumber) {

@@ -234,7 +234,13 @@
     }
 
     window.cancelAppt = async function (id) {
-        if (!confirm('Are you sure you want to cancel this appointment?')) return;
+        const confirmed = await MV.confirm({
+            title: 'Cancel appointment?',
+            message: 'Are you sure you want to cancel this appointment?',
+            confirmText: 'Cancel Appointment',
+            kind: 'danger'
+        });
+        if (!confirmed) return;
         try {
             await MV.api.post('/api/patient/appointments/' + id + '/cancel', {});
             MV.toast.success('Appointment cancelled');
@@ -309,7 +315,7 @@
                 '<div class="dept-grid">' +
                   departments.map(function (d) {
                       const sel = d.department_id === bookingData.department_id ? 'selected' : '';
-                      return '<div class="dept-card ' + sel + '" onclick="selectDept(' + d.department_id + ')">' +
+                      return '<div class="dept-card ' + sel + '" onclick="selectDept(' + d.department_id + ', this)">' +
                           '<i class="fas fa-hospital mb-2" style="font-size:22px;color:var(--mv-text)"></i>' +
                           '<div class="small fw-semibold">' + MV.esc(d.department_name) + '</div>' +
                         '</div>';
@@ -320,11 +326,11 @@
         }
     }
 
-    window.selectDept = function (id) {
+    window.selectDept = function (id, el) {
         if (bookingData.department_id !== id) { bookingData.doctor_id = null; bookingData.appointment_time = null; }
         bookingData.department_id = id;
-        document.querySelectorAll('.dept-card').forEach(el => el.classList.remove('selected'));
-        event.currentTarget.classList.add('selected');
+        document.querySelectorAll('.dept-card').forEach(card => card.classList.remove('selected'));
+        if (el) el.classList.add('selected');
     };
 
     async function renderDoctors(container) {
@@ -340,7 +346,7 @@
                   doctors.map(function (doc) {
                       const sel = doc.doctor_id === bookingData.doctor_id ? 'selected' : '';
                       const initials = MV.fmt.initials(doc.doctor_name);
-                      return '<div class="doctor-card ' + sel + '" onclick="selectDoctor(' + doc.doctor_id + ')">' +
+                      return '<div class="doctor-card ' + sel + '" onclick="selectDoctor(' + doc.doctor_id + ', this)">' +
                           '<div class="doctor-avatar">' + initials + '</div>' +
                           '<div class="flex-grow-1">' +
                             '<h6 class="mb-0">' + MV.esc(MV.fmt.docName(doc.doctor_name)) + '</h6>' +
@@ -354,11 +360,11 @@
         }
     }
 
-    window.selectDoctor = function (id) {
+    window.selectDoctor = function (id, el) {
         if (bookingData.doctor_id !== id) bookingData.appointment_time = null;
         bookingData.doctor_id = id;
-        document.querySelectorAll('.doctor-card').forEach(el => el.classList.remove('selected'));
-        event.currentTarget.classList.add('selected');
+        document.querySelectorAll('.doctor-card').forEach(card => card.classList.remove('selected'));
+        if (el) el.classList.add('selected');
     };
 
     function renderCalendar(container) {
@@ -375,7 +381,7 @@
               days.map(function (d) {
                   const iso = MV.fmt.isoDate(d);
                   const sel = iso === bookingData.appointment_date ? 'selected' : '';
-                  return '<div class="calendar-day ' + sel + '" onclick="selectDate(\'' + iso + '\')">' +
+                  return '<div class="calendar-day ' + sel + '" onclick="selectDate(\'' + iso + '\', this)">' +
                       '<span>' + d.getDate() + '</span>' +
                       '<small>' + d.toLocaleDateString('en-IN', { month: 'short', weekday: 'short' }) + '</small>' +
                     '</div>';
@@ -383,11 +389,11 @@
             '</div>';
     }
 
-    window.selectDate = function (date) {
+    window.selectDate = function (date, el) {
         if (bookingData.appointment_date !== date) bookingData.appointment_time = null;
         bookingData.appointment_date = date;
-        document.querySelectorAll('.calendar-day').forEach(el => el.classList.remove('selected'));
-        event.currentTarget.classList.add('selected');
+        document.querySelectorAll('.calendar-day').forEach(card => card.classList.remove('selected'));
+        if (el) el.classList.add('selected');
     };
 
     async function renderTimeSlots(container) {
@@ -402,7 +408,7 @@
                 '<div class="time-grid">' +
                   availableSlots.map(function (time) {
                       const sel = time === bookingData.appointment_time ? 'selected' : '';
-                      return '<div class="time-slot ' + sel + '" onclick="selectTime(\'' + time + '\')">' +
+                      return '<div class="time-slot ' + sel + '" onclick="selectTime(\'' + time + '\', this)">' +
                           MV.fmt.time12(time) +
                         '</div>';
                   }).join('') +
@@ -412,10 +418,10 @@
         }
     }
 
-    window.selectTime = function (time) {
+    window.selectTime = function (time, el) {
         bookingData.appointment_time = time;
-        document.querySelectorAll('.time-slot').forEach(el => el.classList.remove('selected'));
-        event.currentTarget.classList.add('selected');
+        document.querySelectorAll('.time-slot').forEach(card => card.classList.remove('selected'));
+        if (el) el.classList.add('selected');
     };
 })();
 </script>

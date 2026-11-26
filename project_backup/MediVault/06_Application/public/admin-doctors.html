@@ -39,6 +39,28 @@
   </div>
 </div>
 
+<!-- Edit Doctor Modal -->
+<div class="modal fade" id="editDoctorModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title">Edit Doctor</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <form id="editDoctorForm">
+          <input type="hidden" id="editDocId" name="doctor_id">
+          <div class="mb-3"><label class="form-label">Doctor</label><input type="text" class="form-control" id="editDocName" readonly></div>
+          <div class="mb-3"><label class="form-label">Specialization</label><input type="text" class="form-control" id="editDocSpec" name="specialization" required></div>
+          <div class="mb-3"><label class="form-label">Qualification</label><input type="text" class="form-control" id="editDocQual" name="qualification"></div>
+          <div class="mb-3"><label class="form-label">Consultation Fee (₹)</label><input type="number" class="form-control" id="editDocFee" name="consultation_fee" min="0" step="50" required></div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="mv-btn mv-btn-primary" id="updateDoctorBtn">Save Changes</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
 <script src="/assets/js/mv-core.js"></script>
 <script src="/assets/js/mv-shell.js"></script>
@@ -46,6 +68,7 @@
 (function () {
     'use strict';
     let addModal;
+    let editModal;
     let table;
 
     (async function init() {
@@ -62,8 +85,10 @@
             '<div class="mv-footer">MediCare - Hospital Management System</div>';
 
         addModal = new bootstrap.Modal(document.getElementById('addDoctorModal'));
+        editModal = new bootstrap.Modal(document.getElementById('editDoctorModal'));
         document.getElementById('addDoctorBtn').addEventListener('click', openAddModal);
         document.getElementById('saveDoctor').addEventListener('click', saveDoctor);
+        document.getElementById('updateDoctorBtn').addEventListener('click', updateDoctor);
         document.getElementById('refreshBtn').addEventListener('click', function () { table.reload(); });
 
         table = new MV.DataTable(document.getElementById('doctorSlot'), {
@@ -76,9 +101,26 @@
                 { key: 'consultation_fee',label: 'Fee', render: function (r) { return '₹' + MV.fmt.numberIndian(r.consultation_fee); } }
             ],
             fetch: function () { return MV.api.get('/api/admin/doctors'); },
+            rowActions: function (r) {
+                return '<button type="button" class="mv-btn mv-btn-outline mv-btn-sm" data-edit-doc="' + r.doctor_id + '">Edit</button>';
+            },
             searchKeys: ['name', 'email', 'department_name', 'specialization'],
             pageSize: 15,
             searchPlaceholder: 'Search doctors...'
+        });
+
+        document.getElementById('doctorSlot').addEventListener('click', function (e) {
+            const btn = e.target.closest('[data-edit-doc]');
+            if (!btn) return;
+            const did = Number(btn.getAttribute('data-edit-doc'));
+            const doc = table.getRows().find(function (r) { return Number(r.doctor_id) === did; });
+            if (!doc) return;
+            document.getElementById('editDocId').value = doc.doctor_id;
+            document.getElementById('editDocName').value = doc.name || '';
+            document.getElementById('editDocSpec').value = doc.specialization || '';
+            document.getElementById('editDocQual').value = doc.qualification || '';
+            document.getElementById('editDocFee').value = doc.consultation_fee != null ? doc.consultation_fee : 500;
+            editModal.show();
         });
 
         loadDepartments();
@@ -116,6 +158,22 @@
             table.reload();
         } catch (err) {
             MV.toast.error('Failed to add doctor', err.message);
+        } finally { restore(); }
+    }
+
+    async function updateDoctor() {
+        const form = document.getElementById('editDoctorForm');
+        if (!form.checkValidity()) { form.reportValidity(); return; }
+        const btn = document.getElementById('updateDoctorBtn');
+        const restore = MV.pending(btn, 'Saving...');
+        const data = Object.fromEntries(new FormData(form));
+        try {
+            await MV.api.put('/api/admin/doctors/' + data.doctor_id, data);
+            MV.toast.success('Doctor updated');
+            editModal.hide();
+            table.reload();
+        } catch (err) {
+            MV.toast.error('Failed to update doctor', err.message);
         } finally { restore(); }
     }
 })();

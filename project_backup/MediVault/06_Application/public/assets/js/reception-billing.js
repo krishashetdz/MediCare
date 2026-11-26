@@ -1,6 +1,9 @@
 (function () {
     MV.receptionBilling = function (container) {
-        container.innerHTML =
+        container.innerHTML = '';
+        const root = document.createElement('div');
+        container.appendChild(root);
+        root.innerHTML =
             '<section class="mv-card">' +
                 '<div class="mv-card-head"><h2>Appointments & billing</h2><a class="mv-btn mv-btn-outline" href="/billing.html" data-testid="reception-all-bills">Billing ledger</a></div>' +
                 '<div id="receptionAppointments"></div>' +
@@ -38,10 +41,10 @@
                 '</div>' +
             '</div>';
 
-        const reschedModalEl = container.querySelector('#rescheduleApptModal');
+        const reschedModalEl = root.querySelector('#rescheduleApptModal');
         const reschedModal = window.bootstrap ? new bootstrap.Modal(reschedModalEl) : null;
 
-        const table = new MV.DataTable(container.querySelector('#receptionAppointments'), {
+        const table = new MV.DataTable(root.querySelector('#receptionAppointments'), {
             columns: [
                 {key:'appointment_id',label:'Visit',render:r=>'#'+r.appointment_id},
                 {key:'patient_name',label:'Patient'}, {key:'doctor_name',label:'Doctor'},
@@ -68,7 +71,7 @@
             empty:{title:'No appointments',text:'No visits on record.'}
         });
 
-        container.addEventListener('click',async event=>{
+        root.addEventListener('click',async event=>{
             const genBtn=event.target.closest('[data-generate-bill]');
             if(genBtn && !genBtn.disabled) {
                 const id=Number(genBtn.dataset.generateBill);
@@ -77,7 +80,7 @@
                 const confirmed=await MV.confirm({title:'Generate bill for '+appointment.patient_name+'?',message:'Visit #'+id+' · '+MV.fmt.date(appointment.appointment_date)+'. Charges will include the recorded consultation, lab tests and prescribed medicines.',confirmText:'Generate Bill',kind:'primary'});
                 if(!confirmed) return;
                 const restore=MV.pending(genBtn,'Generating…');
-                const result=container.querySelector('#billResult');
+                const result=root.querySelector('#billResult');
                 result.textContent='Generating bill for visit #'+id+'…';
                 try {
                     const response=await MV.api.post('/api/staff/receptionist/generate-bill',{appointment_id:id});
@@ -119,22 +122,22 @@
                 const id=Number(reschedBtn.dataset.rescheduleAppt);
                 const appointment=table.getRows().find(r=>r.appointment_id===id);
                 if(!appointment) return;
-                container.querySelector('#reschedApptId').value = id;
-                container.querySelector('#reschedSummary').value = appointment.patient_name + ' · ' + appointment.doctor_name;
-                container.querySelector('#reschedDate').value = String(appointment.appointment_date || '').slice(0, 10);
-                container.querySelector('#reschedTime').value = String(appointment.appointment_time || '').slice(0, 5);
+                root.querySelector('#reschedApptId').value = id;
+                root.querySelector('#reschedSummary').value = appointment.patient_name + ' · ' + appointment.doctor_name;
+                root.querySelector('#reschedDate').value = String(appointment.appointment_date || '').slice(0, 10);
+                root.querySelector('#reschedTime').value = String(appointment.appointment_time || '').slice(0, 5);
                 if (reschedModal) reschedModal.show();
             }
         });
 
-        const confirmReschedBtn = container.querySelector('#confirmRescheduleBtn');
+        const confirmReschedBtn = root.querySelector('#confirmRescheduleBtn');
         if (confirmReschedBtn) {
             confirmReschedBtn.addEventListener('click', async function () {
-                const form = container.querySelector('#rescheduleApptForm');
+                const form = root.querySelector('#rescheduleApptForm');
                 if (!form.checkValidity()) return form.reportValidity();
-                const id = Number(container.querySelector('#reschedApptId').value);
-                const appointment_date = container.querySelector('#reschedDate').value;
-                let appointment_time = container.querySelector('#reschedTime').value;
+                const id = Number(root.querySelector('#reschedApptId').value);
+                const appointment_date = root.querySelector('#reschedDate').value;
+                let appointment_time = root.querySelector('#reschedTime').value;
                 if (appointment_time && appointment_time.length === 5) appointment_time += ':00';
                 const restore = MV.pending(confirmReschedBtn, 'Saving…');
                 try {

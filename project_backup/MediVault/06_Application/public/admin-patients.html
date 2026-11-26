@@ -14,12 +14,30 @@
 </head>
 <body>
 <div class="mv-layout" id="mvShell"></div>
+
+<div class="modal fade" id="patientDetailModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="pdTitle">Patient Details</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="pdBody"></div>
+      <div class="modal-footer">
+        <button type="button" class="mv-btn mv-btn-outline" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
 <script src="/assets/js/mv-core.js"></script>
 <script src="/assets/js/mv-shell.js"></script>
 <script>
 (function () {
     'use strict';
+    let detailModal;
+
     (async function init() {
         const ctx = await MV.shell.mount({ roles: ['Admin'], title: 'Patients', subtitle: 'All registered patients' });
 
@@ -32,6 +50,7 @@
             '</div>' +
             '<div class="mv-footer">MediCare - Hospital Management System</div>';
 
+        detailModal = new bootstrap.Modal(document.getElementById('patientDetailModal'));
         document.getElementById('refreshBtn').addEventListener('click', function () { table.reload(); });
 
         const table = new MV.DataTable(document.getElementById('patientSlot'), {
@@ -47,9 +66,28 @@
             fetch: function () {
                 return MV.api.get('/api/admin/patients/all');
             },
+            rowActions: function (r) {
+                return '<button type="button" class="mv-btn mv-btn-outline mv-btn-sm" data-view-patient="' + r.patient_id + '">View</button>';
+            },
             searchKeys: ['name', 'email', 'phone', 'blood_group'],
             pageSize: 15,
             searchPlaceholder: 'Search patients...'
+        });
+
+        document.getElementById('patientSlot').addEventListener('click', function (e) {
+            const btn = e.target.closest('[data-view-patient]');
+            if (!btn) return;
+            const pid = Number(btn.getAttribute('data-view-patient'));
+            const pt = table.getRows().find(function (r) { return Number(r.patient_id) === pid; });
+            if (!pt) return;
+            document.getElementById('pdTitle').textContent = pt.name + ' (#' + pt.patient_id + ')';
+            document.getElementById('pdBody').innerHTML =
+                '<p class="mb-2"><strong>Email:</strong> ' + MV.esc(pt.email || '--') + '</p>' +
+                '<p class="mb-2"><strong>Phone:</strong> ' + MV.esc(pt.phone || '--') + '</p>' +
+                '<p class="mb-2"><strong>Blood Group:</strong> ' + MV.esc(pt.blood_group || '--') + ' &bull; <strong>Gender:</strong> ' + MV.esc(pt.gender || '--') + '</p>' +
+                '<p class="mb-2"><strong>Date of Birth:</strong> ' + (pt.dob ? MV.fmt.dateIndian(pt.dob) : '--') + '</p>' +
+                '<p class="mb-0"><strong>Allergies:</strong> ' + MV.esc(pt.allergies || 'None recorded') + '</p>';
+            detailModal.show();
         });
     })();
 })();

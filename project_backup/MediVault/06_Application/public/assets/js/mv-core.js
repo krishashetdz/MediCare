@@ -666,6 +666,7 @@
             const slice = view.slice(start, start + cfg.pageSize);
 
             if (!total) {
+                tbody.innerHTML = '';
                 tableWrap.style.display = 'none';
                 pager.style.display = 'none';
                 emptySlot.innerHTML = MV.emptyState(query

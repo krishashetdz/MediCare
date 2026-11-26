@@ -273,7 +273,12 @@
 
     window.setApptStatus = async function (appointmentId, newStatus) {
         if (newStatus === 'Cancelled') {
-            const confirmed = window.confirm('Are you sure you want to decline / cancel this appointment?');
+            const confirmed = await MV.confirm({
+                title: 'Cancel appointment?',
+                message: 'Are you sure you want to decline / cancel this appointment?',
+                confirmText: 'Cancel Appointment',
+                kind: 'danger'
+            });
             if (!confirmed) return;
         }
         try {
