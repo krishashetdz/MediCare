@@ -9,7 +9,7 @@ const router = express.Router();
 // Read-only cross-role helper routes (needed by emergency.html & staff-portal.html modals)
 router.get('/doctors', requireRole('Admin', 'Doctor', 'Nurse', 'Receptionist'), async (req, res) => {
     const [rows] = await mysqlPool.query(
-        `SELECT doc.doctor_id, u.name, u.email, dep.department_name, doc.specialization, doc.consultation_fee
+        `SELECT doc.doctor_id, u.name, u.email, dep.department_name, doc.specialization, doc.qualification, doc.consultation_fee
          FROM DOCTOR doc JOIN \`USER\` u ON doc.doctor_id = u.user_id
          JOIN DEPARTMENT dep ON doc.department_id = dep.department_id`
     );
@@ -581,6 +581,26 @@ router.post('/staff', async (req, res) => {
         res.status(500).json({ error: 'Failed to create staff member' });
     } finally {
         conn.release();
+    }
+});
+
+// ---- Toggle staff active status / update shift ----
+router.patch('/staff/:id', async (req, res) => {
+    const targetId = Number(req.params.id);
+    if (!targetId) return res.status(400).json({ error: 'Invalid staff ID' });
+    if (req.body.is_active !== undefined && targetId === Number(req.session.user.id) && !req.body.is_active) {
+        return res.status(400).json({ error: 'Cannot deactivate your own account' });
+    }
+    try {
+        if (req.body.is_active !== undefined) {
+            await mysqlPool.query('UPDATE `USER` SET is_active = ? WHERE user_id = ?', [req.body.is_active ? 1 : 0, targetId]);
+        }
+        if (req.body.shift && ['Morning', 'Evening', 'Night'].includes(req.body.shift)) {
+            await mysqlPool.query('UPDATE STAFF SET shift = ? WHERE staff_id = ?', [req.body.shift, targetId]);
+        }
+        res.json({ message: 'Staff record updated' });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to update staff record' });
     }
 });
 

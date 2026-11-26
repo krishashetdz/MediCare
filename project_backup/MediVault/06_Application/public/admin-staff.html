@@ -109,9 +109,40 @@
                 const url = role ? '/api/admin/staff?role=' + encodeURIComponent(role) : '/api/admin/staff';
                 return MV.api.get(url);
             },
+            rowActions: function (r) {
+                const label = r.is_active ? 'Deactivate' : 'Activate';
+                const cls = r.is_active ? 'text-danger' : 'text-success';
+                return '<button type="button" class="mv-btn mv-btn-outline mv-btn-sm ' + cls + '" data-toggle-staff="' + r.user_id + '" data-next-active="' + (r.is_active ? '0' : '1') + '" data-staff-name="' + MV.esc(r.name) + '">' + label + '</button>';
+            },
             searchKeys: ['name', 'email', 'role_name'],
             pageSize: 15,
             searchPlaceholder: 'Search staff...'
+        });
+
+        document.getElementById('staffSlot').addEventListener('click', async function (e) {
+            const btn = e.target.closest('[data-toggle-staff]');
+            if (!btn) return;
+            const uid = Number(btn.getAttribute('data-toggle-staff'));
+            const nextActive = btn.getAttribute('data-next-active') === '1';
+            const name = btn.getAttribute('data-staff-name') || 'this staff member';
+            const ok = await MV.confirm({
+                title: (nextActive ? 'Activate ' : 'Deactivate ') + name + '?',
+                message: nextActive ? 'Allow this staff account to sign in again.' : 'Prevent this staff account from signing in.',
+                confirmText: nextActive ? 'Activate' : 'Deactivate',
+                kind: nextActive ? 'primary' : 'danger'
+            });
+            if (!ok) return;
+            const restore = MV.pending(btn, 'Updating...');
+            try {
+                await MV.api.patch('/api/admin/staff/' + uid, { is_active: nextActive });
+                MV.toast.success('Staff status updated');
+                table.reload();
+                loadStaffStats();
+            } catch (err) {
+                MV.toast.error('Failed to update staff', err.message);
+            } finally {
+                restore();
+            }
         });
     })();
 

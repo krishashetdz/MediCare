@@ -2686,7 +2686,7 @@ function createInMemoryMysqlPool() {
                 });
             return [rows];
         }
-        if (norm.includes('SELECT doc.doctor_id, u.name, u.email, dep.department_name, doc.specialization, doc.consultation_fee FROM DOCTOR doc')) {
+        if (norm.includes('SELECT doc.doctor_id, u.name, u.email, dep.department_name, doc.specialization') && norm.includes('FROM DOCTOR doc')) {
             const rows = state.tables.DOCTOR.map(doc => {
                 const u = state.tables.USER.find(x => Number(x.user_id) === Number(doc.doctor_id)) || {};
                 const dep = state.tables.DEPARTMENT.find(x => Number(x.department_id) === Number(doc.department_id)) || {};
@@ -2696,6 +2696,7 @@ function createInMemoryMysqlPool() {
                     email: u.email,
                     department_name: dep.department_name,
                     specialization: doc.specialization,
+                    qualification: doc.qualification || '',
                     consultation_fee: doc.consultation_fee
                 };
             });
@@ -2927,6 +2928,27 @@ function createInMemoryMysqlPool() {
                 d.consultation_fee = Number(params[2]);
             }
             return [{ affectedRows: d ? 1 : 0 }];
+        }
+
+        if (norm.includes('SELECT d.department_name, COUNT(a.appointment_id) as count FROM DEPARTMENT d')) {
+            const rows = state.tables.DEPARTMENT.map(dep => {
+                const docIds = state.tables.DOCTOR.filter(doc => Number(doc.department_id) === Number(dep.department_id)).map(doc => Number(doc.doctor_id));
+                const count = state.tables.APPOINTMENT.filter(a => docIds.includes(Number(a.doctor_id))).length;
+                return { department_name: dep.department_name, count };
+            }).sort((a, b) => b.count - a.count);
+            return [rows];
+        }
+
+        if (norm === 'UPDATE `USER` SET is_active = ? WHERE user_id = ?') {
+            const u = state.tables.USER.find(x => Number(x.user_id) === Number(params[1]));
+            if (u) u.is_active = Boolean(Number(params[0]));
+            return [{ affectedRows: u ? 1 : 0 }];
+        }
+
+        if (norm === 'UPDATE STAFF SET shift = ? WHERE staff_id = ?') {
+            const s = state.tables.STAFF.find(x => Number(x.staff_id) === Number(params[1]));
+            if (s) s.shift = params[0];
+            return [{ affectedRows: s ? 1 : 0 }];
         }
 
         return [[]];
