@@ -1434,11 +1434,18 @@ function createInMemoryMysqlPool() {
                     const a = state.tables.APPOINTMENT.find(x => Number(x.appointment_id) === Number(c.appointment_id)) || {};
                     const up = state.tables.USER.find(x => Number(x.user_id) === Number(a.patient_id)) || {};
                     const ud = state.tables.USER.find(x => Number(x.user_id) === Number(a.doctor_id)) || {};
+                    const items = state.tables.PRESCRIPTION_ITEM
+                        .filter(pi => Number(pi.prescription_id) === Number(p.prescription_id))
+                        .map(pi => {
+                            const m = state.tables.MEDICINE.find(x => Number(x.medicine_id) === Number(pi.medicine_id)) || {};
+                            return (m.medicine_name || 'Medicine') + ' (Qty ' + pi.quantity + ')';
+                        });
                     return {
                         prescription_id: p.prescription_id,
                         patient_name: up.name,
                         doctor_name: ud.name,
-                        prescribed_date: p.prescribed_date
+                        prescribed_date: p.prescribed_date,
+                        medicines_summary: items.join(', ')
                     };
                 });
             return [rows];
@@ -1669,6 +1676,26 @@ function createInMemoryMysqlPool() {
         if (norm === "SELECT * FROM ADMISSION WHERE bed_id = ? AND status = 'Admitted' FOR UPDATE") {
             return [state.tables.ADMISSION.filter(a => Number(a.bed_id) === Number(params[0]) && a.status === 'Admitted')];
         }
+        if (norm.includes('SELECT b.bed_id, w.ward_name, b.bed_number, b.status FROM BED b JOIN WARD w ON b.ward_id = w.ward_id WHERE b.status = \'Available\'')) {
+            const wardFilter = norm.includes('AND w.ward_name = ?') ? params[0] : null;
+            let rows = state.tables.BED
+                .filter(b => b.status === 'Available')
+                .map(b => {
+                    const w = state.tables.WARD.find(x => Number(x.ward_id) === Number(b.ward_id)) || {};
+                    return {
+                        bed_id: b.bed_id,
+                        ward_name: w.ward_name || '',
+                        bed_number: b.bed_number,
+                        status: b.status
+                    };
+                });
+            if (wardFilter) {
+                rows = rows.filter(r => r.ward_name === wardFilter);
+            }
+            rows.sort((a, b) => a.ward_name.localeCompare(b.ward_name) || a.bed_number.localeCompare(b.bed_number));
+            return [rows];
+        }
+
         if (norm.includes('FROM BED b JOIN WARD w ON b.ward_id = w.ward_id WHERE b.bed_id = ? FOR UPDATE')) {
             const b = state.tables.BED.find(x => Number(x.bed_id) === Number(params[0]));
             if (!b) return [[]];

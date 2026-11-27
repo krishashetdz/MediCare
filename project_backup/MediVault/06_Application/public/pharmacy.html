@@ -183,10 +183,14 @@
 
             slot.innerHTML = rows.map(function (rx) {
                 const date = MV.fmt.dateIndian(rx.prescribed_date);
+                const meds = rx.medicines_summary
+                    ? '<div class="meta" style="margin-top:0.2rem;color:var(--mv-text)">' + MV.esc(rx.medicines_summary) + '</div>'
+                    : '';
                 return '<div class="prescription-card">' +
                     '<div class="prescription-info">' +
                       '<div class="name">' + MV.esc(rx.patient_name) + '</div>' +
                       '<div class="meta">' + MV.esc(MV.fmt.docName(rx.doctor_name)) + ' · ' + date + '</div>' +
+                      meds +
                     '</div>' +
                     '<button type="button" class="mv-btn mv-btn-primary" data-rx-id="' + rx.prescription_id + '">' +
                       '<i class="fas fa-check"></i><span>Dispense</span>' +

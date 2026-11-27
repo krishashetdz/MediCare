@@ -1043,6 +1043,7 @@
                 + '<h6>Prescription #' + rx.prescription_id + '</h6>'
                 + '<p><strong>Patient:</strong> ' + MV.esc(rx.patient_name) + '</p>'
                 + '<p><strong>Doctor:</strong> ' + MV.esc(rx.doctor_name) + '</p>'
+                + (rx.medicines_summary ? '<p><strong>Medicines:</strong> ' + MV.esc(rx.medicines_summary) + '</p>' : '')
                 + '<p><strong>Date:</strong> ' + new Date(rx.prescribed_date).toLocaleDateString() + '</p>'
               + '</div>';
         });

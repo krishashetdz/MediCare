@@ -855,13 +855,17 @@ router.get('/lab-tech/reports/:reportId', requireRole('Admin', 'Lab Technician',
 // ---- Pharmacist: pending prescriptions -> dispense (transactional batch FEFO + dispensing record) ----
 router.get('/pharmacist/pending-prescriptions', requireRole('Admin', 'Pharmacist'), async (req, res) => {
     const [rows] = await mysqlPool.query(
-        `SELECT pr.prescription_id, up.name AS patient_name, ud.name AS doctor_name, pr.prescribed_date
+        `SELECT pr.prescription_id, up.name AS patient_name, ud.name AS doctor_name, pr.prescribed_date,
+                GROUP_CONCAT(CONCAT(m.medicine_name, ' (Qty ', pi.quantity, ')') ORDER BY pi.item_id SEPARATOR ', ') AS medicines_summary
          FROM PRESCRIPTION pr
          JOIN CONSULTATION c ON pr.consultation_id = c.consultation_id
          JOIN APPOINTMENT a ON c.appointment_id = a.appointment_id
          JOIN PATIENT p ON a.patient_id = p.patient_id JOIN \`USER\` up ON p.patient_id = up.user_id
          JOIN DOCTOR doc ON a.doctor_id = doc.doctor_id JOIN \`USER\` ud ON doc.doctor_id = ud.user_id
+         LEFT JOIN PRESCRIPTION_ITEM pi ON pr.prescription_id = pi.prescription_id
+         LEFT JOIN MEDICINE m ON pi.medicine_id = m.medicine_id
          WHERE pr.status = 'Pending'
+         GROUP BY pr.prescription_id, up.name, ud.name, pr.prescribed_date
          ORDER BY pr.prescribed_date ASC`
     );
     res.json(rows);
